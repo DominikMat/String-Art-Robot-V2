@@ -1,5 +1,13 @@
 #include "components.h"
 
+// wlasne znaki do lcd
+byte invLess[8] = { 0b11101, 0b11011, 0b10111, 0b01111, 0b10111, 0b11011, 0b11101, 0b11111 };
+byte invDash[8] = { 0b11111, 0b11111, 0b11111, 0b00000, 0b11111, 0b11111, 0b11111, 0b11111 };
+byte normalDot[8] = { 0b00000, 0b00000, 0b01110, 0b01110, 0b01110, 0b00000, 0b00000, 0b00000 };
+byte invDot[8] = { 0b11111, 0b11111, 0b10001, 0b10001, 0b10001, 0b11111, 0b11111, 0b11111 };
+byte pauseChar[8] = { 0b00000, 0b01010, 0b01010, 0b01010, 0b01010, 0b01010, 0b00000, 0b00000 };
+byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0b11111, 0b11111 };
+
 /* ====================================================================================================== */
 /*                                              COMPONENTS                                                */
 /* ====================================================================================================== */
@@ -14,8 +22,18 @@
         Wire.begin(I2C_SDA, I2C_SCL);
         lcd.init();
         lcd.backlight();
+
+        lcd.createChar(CHAR_INVERTED_LESS, invLess);
+        lcd.createChar(CHAR_INVERTED_DASH, invDash);
+        lcd.createChar(CHAR_DOT, normalDot);
+        lcd.createChar(CHAR_INVERTED_DOT, invDot);
+        lcd.createChar(CHAR_PAUSE, pauseChar);
+        lcd.createChar(CHAR_INVERTED_PAUSE, invPauseChar);
+        
         lcd.setCursor(0, 0);
-        lcd.print("ESP32 Start!");
+        lcd.print("String art robot");
+        lcd.setCursor(0, 1);
+        lcd.print("V2 - Dominik Mat");
     }
     
 /* Servo */
@@ -65,7 +83,7 @@
 
 /* Potentiometer */
     #define POTENTIONMETER_PIN 34
-    #define POTENTIONMETER_MIN_VALUE 220
+    #define POTENTIONMETER_MIN_VALUE 270
     #define POTENTIONMETER_MAX_VALUE 4000
 
     float potentiometerValue = 0; 
@@ -73,10 +91,11 @@
     void initPotentiometer() {
         pinMode(POTENTIONMETER_PIN, INPUT);
     }
-    void readPotentiometer() {
+    float readPotentiometer() {
         int currentAnaglogValue = analogRead(POTENTIONMETER_PIN);
         potentiometerValue = (float)(currentAnaglogValue-POTENTIONMETER_MIN_VALUE) / (float)(POTENTIONMETER_MAX_VALUE-POTENTIONMETER_MIN_VALUE);
         potentiometerValue  = max(0.0f, min(1.0f, 1.0f - potentiometerValue)); 
+        return potentiometerValue;
     }   
 
 /* Led */
@@ -85,7 +104,6 @@
     #define LED_B 32
     int colorState = 0; 
     
-    void setRGBColor(int r, int g, int b);
     void initLed() {
         pinMode(LED_R, OUTPUT);
         pinMode(LED_G, OUTPUT);
@@ -93,9 +111,22 @@
         setRGBColor(0, 0, 0);
     }
     void setRGBColor(int r, int g, int b) {
-      analogWrite(LED_R, r);
-      analogWrite(LED_G, g);
-      analogWrite(LED_B, b);
+        Serial.printf("Setting rgb diode colour: RGB(%d,%d,%d)",r,g,b);
+        analogWrite(LED_R, r);
+        analogWrite(LED_G, g);
+        analogWrite(LED_B, b);
+    }
+    void set_rgb_specified_colour(RGBColour colour) {
+        switch (colour) {
+            case COLOUR_PRINTING:       setRGBColor(0, 0, 255);   break; // Niebieski - pracuje
+            case COLOUR_PRINT_COMPLETE: setRGBColor(0, 150, 0);   break; // Ciemniejszy zielony
+            case COLOUR_PRINT_PAUSED:   setRGBColor(255, 100, 0); break; // Jasny pomarańczowy
+            case COLOUR_PRINT_STOPPED:  setRGBColor(255, 20, 0);  break; // Czerwono-pomarańczowy
+            case COLOUR_READY:          setRGBColor(0, 255, 255); break; // Cyjan - gotowy do wyboru
+            case COLOUR_ERROR:          setRGBColor(255, 0, 0);   break; // Czysty czerwony
+            case COLOUR_CLEAR:          setRGBColor(0, 0, 0);     break; // Wyłączony
+            default:                    setRGBColor(0, 0, 0);     break;
+        }
     }
 
 /* Button */
@@ -115,6 +146,10 @@
         pinMode(BUTTON_PIN, INPUT_PULLUP);
         attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButton1, FALLING);
     }   
+    bool checkButtonPressed() {
+        if (isButtonPressed) { isButtonPressed = false; return true; }
+        else return false;
+    }
 
 /* SD Card Reader */
     #define SD_CS_PIN 5
@@ -123,13 +158,77 @@
     #define SD_MOSI_PIN 23
 
     void initSDReader() {
-        Serial.print("Inicjalizacja karty SD... ");
+        Serial.print("Init SD Card ... ");
         if (!SD.begin(SD_CS_PIN)) {
-            Serial.println("BLAD! Sprawdz kable lub karte.");
+            Serial.println("> SD card NOT detected.");
         } else {
-            Serial.println("SUKCES! Karta wykryta.");
+            Serial.println("> SD card detected!");
         }
     }
+    std::vector<std::string> readPrintableFileNames() {
+        std::vector<std::string> fileNames;
+        File root = SD.open("/");
+        if (!root) {
+            Serial.println("Nie mozna otworzyc folderu glownego SD");
+            return fileNames;
+        }
+
+        File file = root.openNextFile();
+        while (file) {
+            if (!file.isDirectory()) {
+                String name = file.name();
+                // Szukamy plików z rozszerzeniem .gcode
+                if (name.endsWith(".gcode") || name.endsWith(".GCODE")) {
+                    int dotIndex = name.lastIndexOf('.'); // usun rozszerzenie
+                    String nameWithoutExt = name.substring(0, dotIndex);
+                    if (nameWithoutExt.startsWith("/")) { // unsun wiodacy slash
+                        nameWithoutExt = nameWithoutExt.substring(1);
+                    }
+                    fileNames.push_back(nameWithoutExt.c_str());
+                }
+            }
+            file = root.openNextFile();
+        }
+        root.close();
+        return fileNames;
+    }
+    PrintSequence generatePrintSequenceFromFile(std::string filename) {
+        PrintSequence seq;
+        seq.print_name = filename;
+        
+        String fullPath = "/" + String(filename.c_str()) + ".gcode";
+        File file = SD.open(fullPath);
+        if (!file) return seq;
+
+        bool inSequence = false;
+        
+        while (file.available()) {
+            // Czytamy całą linię do znaku nowej linii, funkcja trim() usuwa białe znaki (np. \r)
+            String line = file.readStringUntil('\n');
+            line.trim(); 
+            
+            if (line.length() == 0) continue;
+
+            if (line.startsWith("NAIL_TOTAL_NUM=")) {
+                seq.nail_number = line.substring(15).toInt();
+            } 
+            else if (line.startsWith("SEQUENCE_LENGTH=")) {
+                seq.sequence_length = line.substring(16).toInt();
+            } 
+            else if (line == "SEQUENCE_START") {
+                inSequence = true;
+            } 
+            else if (line == "SEQUENCE_END") {
+                inSequence = false;
+            } 
+            else if (inSequence) {
+                seq.nail_sequence.push_back(line.toInt());
+            }
+        }
+        file.close();
+        return seq;
+    }
+
 
 /* Hall Sensor */
     #define HALL_INPUT_PIN 35
@@ -138,8 +237,9 @@
     void initHallSensor() {
         pinMode(HALL_INPUT_PIN, INPUT);
     }
-    void readHallSensor() {
+    int readHallSensor() {
         hallValue = analogRead(HALL_INPUT_PIN);
+        return hallValue;
     }
 
 /* DRV Stepper Controller (AccelStepper) */
