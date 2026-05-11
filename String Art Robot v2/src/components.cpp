@@ -125,6 +125,7 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
             case COLOUR_READY:          setRGBColor(0, 255, 255); break; // Cyjan - gotowy do wyboru
             case COLOUR_ERROR:          setRGBColor(255, 0, 0);   break; // Czysty czerwony
             case COLOUR_CLEAR:          setRGBColor(0, 0, 0);     break; // Wyłączony
+            case COLOUR_ALERT:          setRGBColor(255, 0, 255);     break; // Wyłączony
             default:                    setRGBColor(0, 0, 0);     break;
         }
     }

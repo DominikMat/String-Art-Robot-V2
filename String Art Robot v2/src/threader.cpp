@@ -1,4 +1,5 @@
 #include "threader.h"
+#include "lcd_menu.h"
 #include "components.h" // dla funkcji sprzętowych np. obrotu silnika
 #include <Arduino.h>
 
@@ -7,17 +8,19 @@ bool print_loaded = false;
 int print_progress_percent = 0;
 bool paused = false;
 
-// --- Parametry mechaniki z V1 ---
-const int num_nails = 32; 
-const int stepper_steps_per_ring_rotation = 4096 * 4; 
-const int steps_per_nail = stepper_steps_per_ring_rotation / num_nails; 
-const int target_stepper_rpm = 10;
-const int step_delay_microseconds = (60 / target_stepper_rpm) * 1000 * 1000 / 4096; 
+// STEPPER PARAMS
+const int NUM_NAILS = 32; 
+const float MICRO_STEP_MODE = 1; // 0.5 for half-step, 0.25 for quarter
+const int STEPS_PER_FULL_ROTATION = 200 / MICRO_STEP_MODE; 
+const float STEPS_PER_SINGLE_NAIL = STEPS_PER_FULL_ROTATION / NUM_NAILS; 
+const int TARGET_STEPPER_RPM = 10;
+const int STEP_DELAY_MICROSECONDS = (60 / TARGET_STEPPER_RPM) * 1000 * 1000 / 4096; 
 
-const int servo_middle_angle = 90;
-const int servo_rotation_angle_span = 30;
-const int servo_inside_angle = servo_middle_angle + servo_rotation_angle_span / 2;
-const int servo_outside_angle = servo_middle_angle - servo_rotation_angle_span / 2;
+// SERVO PARAMS
+const int SERVO_MIDDLE_ANGLE = 90;
+const int SERVO_ROTATION_ANGLE_SPAN = 30;
+const int SERVO_INSIDE_ANGLE = SERVO_MIDDLE_ANGLE + SERVO_ROTATION_ANGLE_SPAN / 2;
+const int SERVO_OUTSIDE_ANGLE = SERVO_MIDDLE_ANGLE - SERVO_ROTATION_ANGLE_SPAN / 2;
 const int SERVO_DELAY_MS = 1500;
 
 // Stan maszyny
@@ -29,36 +32,35 @@ int next_nail = 0;
 TaskHandle_t printTaskHandle = NULL;
 
 void load_new_print_sequence(PrintSequence seq) {
-    // 1. Zabezpieczenie przed wielokrotnym tworzeniem zadań
+    // Zakoncz poprzednie zadanie jesli aktywne
     if (printTaskHandle != NULL) {
         Serial.println("Stopping previous task...");
         stop_printing(); 
         vTaskDelay(200 / portTICK_PERIOD_MS); // Daj czas na posprzątanie
     }
-
     current_print = seq;
     
-    // 2. Sprawdzenie czy sekwencja w ogóle ma dane
+    // Sprawdz czy sa dane w sekwencji
     if (current_print.nail_sequence.empty()) {
-        Serial.println("ERROR: Nail sequence is EMPTY! Task not started.");
+        set_printing_error("ERR Nail sequen-", "-ce is empty!");
         return;
     }
 
+    // sprawdz czy rozklad gwozdzi sie zgadza
+    if (current_print.nail_number != NUM_NAILS) {
+        // "Nail num mismatch seq:200 set:200"
+        set_printing_error("ERR Nail num", "mismatch seq:"+std::to_string(current_print.nail_number) + " set:" + std::to_string(NUM_NAILS));
+    }
+
+    // ustaw dane poczatkowe
     print_loaded = true;
     paused = false;
     print_progress_percent = 0;
-    
     Serial.printf("Creating task for print: %s with %d nails\n", current_print.print_name.c_str(), current_print.nail_sequence.size());
 
-    // 3. Tworzymy zadanie z wyższym priorytetem (np. 2), żeby na pewno ruszyło
+    // Tworzymy osobny watek na drukowanie
     BaseType_t result = xTaskCreatePinnedToCore(
-        printTask,
-        "PrintTask",
-        8192,               // Zwiększony stos dla bezpieczeństwa
-        NULL,
-        2,                  // Wyższy priorytet
-        &printTaskHandle,
-        0                   // Przypisanie do Core 0 (pętla loop() zwykle działa na Core 1)
+        printTask,"PrintTask", 8192, NULL, 2, &printTaskHandle, 0
     );
 
     if (result != pdPASS) {
@@ -87,7 +89,13 @@ void stop_printing() {
         printTaskHandle = NULL;
     }
     Serial.println("Wydruk przerwany przez uzytkownika (STOP).");
+    showAlert("Printing STOP");
     set_rgb_specified_colour(COLOUR_PRINT_STOPPED);
+}
+
+void set_printing_error(std::string line1, std::string line2) {
+    showAlert(line1,line2);
+    Serial.print( ("Printing error thrown: " + line1+line2).c_str() );
 }
 
 void rotate_ring(int steps, bool anti_clockwise) {
@@ -99,47 +107,44 @@ void rotate_ring(int steps, bool anti_clockwise) {
         }
         if (!print_loaded) return; 
 
-        // ------------------------------------------------------------------
-        // TODO: TUTAJ WSTAW FUNKCJĘ Z TWOJEGO NOWEGO components.h 
-        // np. stepStepper(anti_clockwise); albo customowy zapis do pinów
-        // ------------------------------------------------------------------
+        // TODO funkcja ruszajaca silnikiem
         
-        current_ring_step_position = (current_ring_step_position + (anti_clockwise ? 1 : (stepper_steps_per_ring_rotation-1))) % stepper_steps_per_ring_rotation; 
-        delayMicroseconds(step_delay_microseconds);
+        current_ring_step_position = (current_ring_step_position + (anti_clockwise ? 1 : (STEPS_PER_FULL_ROTATION-1))) % STEPS_PER_FULL_ROTATION; 
+        delayMicroseconds(STEP_DELAY_MICROSECONDS);
         vTaskDelay(2 / portTICK_PERIOD_MS);
     }
 }
 
 void rotate_ring_to_nail(int nail_idx) {
-    int target_pos = nail_idx * steps_per_nail;
+    int target_pos = nail_idx * STEPS_PER_SINGLE_NAIL;
     int diff = target_pos - current_ring_step_position;
     
     // Obliczanie najkrótszej drogi obrotu (zgodnie ze wskazówkami lub pod prąd)
-    if (diff > stepper_steps_per_ring_rotation / 2) diff -= stepper_steps_per_ring_rotation;
-    if (diff < -stepper_steps_per_ring_rotation / 2) diff += stepper_steps_per_ring_rotation;
+    if (diff > STEPS_PER_FULL_ROTATION / 2) diff -= STEPS_PER_FULL_ROTATION;
+    if (diff < -STEPS_PER_FULL_ROTATION / 2) diff += STEPS_PER_FULL_ROTATION;
 
     rotate_ring(abs(diff), diff > 0);
 }
 
 void plot_around_nail (int nail_idx) {
     rotate_ring_to_nail(nail_idx);
-    if(!print_loaded) return; // Jeśli wcisnęliśmy stop w trakcie obrotu pierścienia
+    if(!print_loaded) return;
         
-    servoWrite(servo_outside_angle);
+    servoWrite(SERVO_OUTSIDE_ANGLE);
     vTaskDelay(SERVO_DELAY_MS / portTICK_PERIOD_MS);
     if(!print_loaded) return;
     
-    rotate_ring_to_nail((nail_idx + 1) % num_nails);
+    rotate_ring_to_nail((nail_idx + 1) % NUM_NAILS);
     if(!print_loaded) return;
     
-    servoWrite(servo_inside_angle);
+    servoWrite(SERVO_INSIDE_ANGLE);
     vTaskDelay(SERVO_DELAY_MS / portTICK_PERIOD_MS);
 }
 
 void printTask(void *pvParameters) {
     Serial.println(">>>> PRINT TASK STARTED <<<<");
     
-    servoWrite(servo_inside_angle);
+    servoWrite(SERVO_INSIDE_ANGLE);
     vTaskDelay(1000 / portTICK_PERIOD_MS);
 
     int total_nails = current_print.nail_sequence.size();

@@ -11,6 +11,7 @@ enum Screen {
 };
 
 const int DEFAULT_SCREEN_REFRESH_INTERVAL_MS = 1000;
+const int DEFALUT_ALERT_DURATION_MS = 2250;
 
 // menu option struct
 using MenuCallback = std::function<void()>;
@@ -33,7 +34,7 @@ void actionStartPrint(std::string filename);
 void changeMenuScreen(Screen new_screen);
 std::string get_menu_title(Screen screen);
 void goBack();
-void showAlert(std::string msg, int durationMs = 1000);
+void showAlert(std::string msg1, std::string msg2="", int durationMs = DEFALUT_ALERT_DURATION_MS);
 
 // glowna funckja
 void draw_lcd_menu();

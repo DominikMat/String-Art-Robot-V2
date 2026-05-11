@@ -19,6 +19,7 @@ void rotate_ring(int steps, bool anti_clockwise);
 void rotate_ring_to_nail(int nail_idx);
 void plot_around_nail(int nail_idx);
 
+void set_printing_error(std::string line1, std::string line2 = "");
 void printTask(void *params);
 
 #endif

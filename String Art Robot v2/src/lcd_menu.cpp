@@ -5,6 +5,8 @@
 #include <string>
 #include <vector>
 
+#define max(a,b) (a > b ? a : b)
+
 // variables
 bool refreshScreenNextCycle = true;
 bool skipLcdClear = false;
@@ -27,13 +29,16 @@ std::vector<MenuOption> currentMenuOptions;
 extern std::vector<MenuOption> sensorMenu;
 
 /* callbacki na klikniecie */
-void showAlert(std::string msg, int durationMs) {
-    alertMessage = msg;
+void showAlert(std::string msg_line_1, std::string msg_line_2, int durationMs) {
+    alertMessage = msg_line_1+msg_line_2;
     alertEndTime = millis() + durationMs;
     isAlertActive = true;
     lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(msg.c_str());
+    lcd.setCursor(max(0,(16-msg_line_1.size())/2), 0); // wysrodkowanie
+    lcd.print(msg_line_1.c_str());
+    lcd.setCursor(max(0,(16-msg_line_2.size())/2),1); // wysrodkowanie
+    lcd.print(msg_line_2.c_str());
+    set_rgb_specified_colour(RGBColour::COLOUR_ALERT);
 }
 
 void actionStartPrint(std::string filename) {
@@ -180,6 +185,7 @@ void draw_lcd_menu() {
         if (currentMs > alertEndTime) {
             isAlertActive = false;
             refreshScreenNextCycle = true;
+            set_rgb_specified_colour(RGBColour::COLOUR_CLEAR);
         } else {
             return; 
         }

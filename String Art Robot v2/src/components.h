@@ -32,7 +32,8 @@ enum RGBColour {
     COLOUR_PRINT_STOPPED,  // Czerwono-pomarańczowy
     COLOUR_READY,          // Cyjan / Jasny niebieski
     COLOUR_ERROR,          // Czerwony
-    COLOUR_CLEAR           // Wyłączony
+    COLOUR_CLEAR,          // Wyłączony
+    COLOUR_ALERT           // fiolet taki
 };
 
 struct PrintSequence {
