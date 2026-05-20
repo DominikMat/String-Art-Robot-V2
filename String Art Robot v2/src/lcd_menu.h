@@ -36,6 +36,9 @@ std::string get_menu_title(Screen screen);
 void goBack();
 void showAlert(std::string msg1, std::string msg2="", int durationMs = DEFALUT_ALERT_DURATION_MS);
 
+// helpery
+int update_menu_selection();
+
 // glowna funckja
 void draw_lcd_menu();
 

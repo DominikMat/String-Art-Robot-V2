@@ -1,4 +1,6 @@
 #include "components.h"
+#include "lcd_menu.h"
+#include "threader.h"
 
 // wlasne znaki do lcd
 byte invLess[8] = { 0b11101, 0b11011, 0b10111, 0b01111, 0b10111, 0b11011, 0b11101, 0b11111 };
@@ -83,8 +85,8 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
 
 /* Potentiometer */
     #define POTENTIONMETER_PIN 34
-    #define POTENTIONMETER_MIN_VALUE 270
-    #define POTENTIONMETER_MAX_VALUE 4000
+    #define POTENTIONMETER_MIN_VALUE 100
+    #define POTENTIONMETER_MAX_VALUE 3600
 
     float potentiometerValue = 0; 
 
@@ -97,6 +99,9 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         potentiometerValue  = max(0.0f, min(1.0f, 1.0f - potentiometerValue)); 
         return potentiometerValue;
     }   
+    int readPotentiometerRaw() {
+        return analogRead(POTENTIONMETER_PIN);
+    }
 
 /* Led */
     #define LED_R 13
@@ -157,20 +162,34 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
     #define SD_SCK_PIN 18
     #define SD_MISO_PIN 19
     #define SD_MOSI_PIN 23
+    bool sd_card_detected = false;
 
     void initSDReader() {
         Serial.print("Init SD Card ... ");
         if (!SD.begin(SD_CS_PIN)) {
             Serial.println("> SD card NOT detected.");
         } else {
+            sd_card_detected = true;
             Serial.println("> SD card detected!");
         }
     }
+    void attempt_detect_sd_card() {
+        Serial.print("Attempting Detect SD card ... ");
+        if (SD.begin(SD_CS_PIN)) {
+          showAlert("new SD card" , "detected");
+          Serial.println("> detected");  
+          sd_card_detected = true;
+        } 
+        else sd_card_detected = false;
+    }
     std::vector<std::string> readPrintableFileNames() {
+        if (!sd_card_detected) attempt_detect_sd_card();
+
         std::vector<std::string> fileNames;
         File root = SD.open("/");
         if (!root) {
             Serial.println("Nie mozna otworzyc folderu glownego SD");
+            sd_card_detected = false;
             return fileNames;
         }
 
@@ -194,6 +213,8 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         return fileNames;
     }
     PrintSequence generatePrintSequenceFromFile(std::string filename) {
+        if (!sd_card_detected) attempt_detect_sd_card();
+
         PrintSequence seq;
         seq.print_name = filename;
         
@@ -210,8 +231,8 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
             
             if (line.length() == 0) continue;
 
-            if (line.startsWith("NAIL_TOTAL_NUM=")) {
-                seq.nail_number = line.substring(15).toInt();
+            if (line.startsWith("NAIL_NUMBER=")) {
+                seq.nail_number = line.substring(12).toInt();
             } 
             else if (line.startsWith("SEQUENCE_LENGTH=")) {
                 seq.sequence_length = line.substring(16).toInt();
@@ -235,6 +256,9 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
     #define HALL_INPUT_PIN 35
     int hallValue = 0;
 
+    const int TARGET_STEPPER_RPM = 10;
+    const int STEP_DELAY_MICROSECONDS = (60 / TARGET_STEPPER_RPM) * 1000 * 1000 / 4096; 
+
     void initHallSensor() {
         pinMode(HALL_INPUT_PIN, INPUT);
     }
@@ -247,12 +271,69 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
     #define DRV_STEP_PIN 26
     #define DRV_DIR_PIN 27
     
-    // Inicjalizacja biblioteki w trybie DRIVER (Step/Dir)
-    AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
-    
-    float currentStepperSpeed = 0.0; //800.0;
+    #define USE_LIBRARY_STEPPER true 
+    const int STEPS_PER_FULL_STEPPER_ROTATION = 200;
+    const int TARGET_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.3; // steps per second
+
+    #if USE_LIBRARY_STEPPER
+        AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
+    #endif
 
     void initStepper() {
-        stepper.setMaxSpeed(2000.0);
-        stepper.setSpeed(currentStepperSpeed);
+        #if USE_LIBRARY_STEPPER
+            stepper.setMaxSpeed(STEPS_PER_FULL_STEPPER_ROTATION * 4);
+            stepper.setAcceleration(500.0); // Opcjonalnie rampy dla płynności
+        #else
+            pinMode(DRV_STEP_PIN, OUTPUT);
+            pinMode(DRV_DIR_PIN, OUTPUT);
+        #endif
     }
+
+    void move_stepper_steps(int step_number, bool anti_clockwise) {
+        if (step_number <= 0) return;
+
+        #if USE_LIBRARY_STEPPER
+            // Obliczamy cel relatywny
+            long relative_move = anti_clockwise ? step_number : -step_number;
+            stepper.move(relative_move);
+            stepper.setSpeed(TARGET_STEPPER_SPEED);
+
+            while (stepper.distanceToGo() != 0) {
+                // Reakcja na STOP lub PAUZE
+                if (!is_print_loaded()) {
+                    stepper.stop(); 
+                    return;
+                }
+                while (is_printing_paused() && is_print_loaded()) {
+                    vTaskDelay(50 / portTICK_PERIOD_MS);
+                }
+
+                stepper.runSpeedToPosition();
+            }
+            
+        #else
+            digitalWrite(DRV_DIR_PIN, anti_clockwise ? HIGH : LOW);
+
+            for (int i = 0; i < step_number; i++) {
+                // Obsługa PAUZY i STOPU
+                while (is_printing_paused() && is_print_loaded()) {
+                    vTaskDelay(50 / portTICK_PERIOD_MS);
+                }
+                if (!is_print_loaded()) return;
+
+                // Krok
+                digitalWrite(DRV_STEP_PIN, HIGH);
+                delayMicroseconds(2); 
+                digitalWrite(DRV_STEP_PIN, LOW);
+                
+                // Kontrola prędkości i oddanie czasu dla systemu (Watchdog)
+                delayMicroseconds(STEP_DELAY_MICROSECONDS);
+                if (i % 20 == 0) vTaskDelay(1); 
+            }
+        #endif
+
+        // aktualizacja pozycji globalna
+        int move = anti_clockwise ? step_number : -step_number;
+        set_current_ring_position(get_current_ring_position() + move);
+    }
+

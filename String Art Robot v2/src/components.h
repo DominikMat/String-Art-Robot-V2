@@ -11,10 +11,7 @@
 
 // Deklaracje zmiennych globalnych (używamy extern, by były widoczne w main)
 extern LiquidCrystal_I2C lcd;
-extern float currentStepperSpeed;
-extern AccelStepper stepper;
-extern unsigned long lastDisplayUpdate;
-extern int colorState;
+extern const int STEPS_PER_FULL_STEPPER_ROTATION;
 
 enum LCDCustomChars {
     CHAR_INVERTED_LESS = 0, 
@@ -50,6 +47,7 @@ void loopServo();
 void servoWrite(int angleDeg);
 void initPotentiometer();
 float readPotentiometer();
+int readPotentiometerRaw();
 void initLed();
 void setRGBColor(int r, int g, int b);
 void initButton();
@@ -60,6 +58,7 @@ int readHallSensor();
 void initStepper();
 void setRGBColor(int r, int g, int b);
 void set_rgb_specified_colour(RGBColour colour);
+void move_stepper_steps(int steps, bool dir);
 
 std::vector<std::string> readPrintableFileNames();
 PrintSequence generatePrintSequenceFromFile(std::string filename);
