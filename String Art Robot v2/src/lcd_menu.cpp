@@ -7,6 +7,8 @@
 
 #define max(a,b) (a > b ? a : b)
 
+#define MENU_SELECTION_DEAD_ZONE_PERCENT 0.2f // extra padding on menu option potentionmeter ranges so on transition we dont get flickers
+
 // variables
 bool refreshScreenNextCycle = true;
 bool skipLcdClear = false;
@@ -43,10 +45,13 @@ void showAlert(std::string msg_line_1, std::string msg_line_2, int durationMs) {
 
 void actionStartPrint(std::string filename) {
     PrintSequence seq = generatePrintSequenceFromFile(filename);
-    load_new_print_sequence(seq);
-    Serial.printf("Rozpoczynam wydruk: %s. Kroków: %d\n", seq.print_name.c_str(), seq.nail_sequence.size());
-
-    changeMenuScreen(PROGRESS);
+    if (load_new_print_sequence(seq)){
+        Serial.printf("Rozpoczynam wydruk: %s. Kroków: %d (%d) dla Gwozdzi:%d\n", seq.print_name.c_str(), seq.nail_sequence.size(), seq.sequence_length, seq.nail_number);
+        changeMenuScreen(PROGRESS);
+    } else {
+        Serial.println("Nie udalo sie rozpoczac wydruku");
+        changeMenuScreen(PRINT_SELECT);
+    }
 }
 void prepareScreenData(Screen screen) {
     currentMenuOptions.clear();
@@ -65,14 +70,20 @@ void prepareScreenData(Screen screen) {
         case SENSORS:
             currentMenuOptions = std::vector<MenuOption>{
                 MenuOption("back", []() { goBack(); }),
-                MenuOption("Pot: 0%", nullptr, []() {
-                    int val = (int)(readPotentiometer() * 100);
-                    currentMenuOptions[1].name = "Pot: " + std::to_string(val) + "   ";
+                MenuOption("Pot: 0", nullptr, []() {
+                    int val = (int)(readPotentiometerRaw());
+                    int val2 = (int)(readPotentiometer()*100);
+                    currentMenuOptions[1].name = "Pot:" + std::to_string(val) + " (" + std::to_string(val2) + "%) ";
                 }, 200),
                 MenuOption("Hall: 0", nullptr, []() {
                     int val = (int)(readHallSensor());
                     currentMenuOptions[2].name = "Hall: " + std::to_string(val) + "   ";
-                }, 200)
+                }, 200),
+                MenuOption("Pot: 0", nullptr, []() {
+                    int val = (int)(readPotentiometerRaw());
+                    int val2 = (int)(readPotentiometer()*100);
+                    currentMenuOptions[3].name = "Pot:" + std::to_string(val) + " (" + std::to_string(val2) + "%) ";
+                }, 200),
             };
             break;
 
@@ -93,7 +104,7 @@ void prepareScreenData(Screen screen) {
             currentMenuOptions = std::vector<MenuOption>{
                 MenuOption("back", []() { goBack(); } ),
                 MenuOption("pause",  []() { pause_printing(!is_printing_paused()); } ),
-                MenuOption("stop",  []() { stop_printing(); }),
+                MenuOption("stop",  []() { stop_printing(); changeMenuScreen(PRINT_SELECT); }),
 
                 MenuOption("[----]---% N:---", nullptr, []() {
                     int print_percent = get_current_print_progress_percent();
@@ -177,6 +188,26 @@ std::string get_menu_title(Screen scr) {
     }
 }
 
+
+int update_menu_selection() {
+    int optionsCount = currentMenuOptions.size();
+
+    float potVal = readPotentiometer();
+    float optionWidth = 1.0f / optionsCount;
+
+    float currentLowerLimit = (prevSelected * optionWidth) - (optionWidth * MENU_SELECTION_DEAD_ZONE_PERCENT);
+    float currentUpperLimit = ((prevSelected + 1) * optionWidth) + (optionWidth * MENU_SELECTION_DEAD_ZONE_PERCENT);
+
+    if (potVal < currentLowerLimit || potVal > currentUpperLimit || prevSelected == -1) {
+        int selected = (int)(potVal * optionsCount * 0.999f);
+        selected = constrain(selected, 0, optionsCount - 1);
+        Serial.printf("New option selected: %d (Pot: %.3f, Range: [%.3f - %.3f])\n", 
+                          selected, potVal, currentLowerLimit, currentUpperLimit);
+        return selected;
+    }
+    return prevSelected;
+}
+
 void draw_lcd_menu() {
     unsigned long currentMs = millis();
 
@@ -194,10 +225,10 @@ void draw_lcd_menu() {
     // mapowanie obrotu potencjometru na opcje menu
     int optionsCount = currentMenuOptions.size();
     if (optionsCount == 0) return;
-    int selected = (int)(readPotentiometer() * optionsCount * 0.999f);
-    selected = constrain(selected, 0, optionsCount - 1);
+
+    int selected = update_menu_selection();
     if (selected != prevSelected) {
-        Serial.println(("new option selected: " + std::to_string(selected)).c_str());
+        Serial.printf("New option selected: %d\n", selected);
         refreshScreenNextCycle = true;
         prevSelected = selected;
     }
