@@ -6,7 +6,7 @@ import os
 from itertools import combinations
 
 # --- CONFIGURATION ---
-NUM_PINS = 126          # Number of nails on the ring
+NUM_PINS = 120          # Number of nails on the ring
 RADIUS = 300            # Radius of the ring in pixels
 WINDOW_SIZE = 800       # Size of the window
 ANIMATION_SPEED = 0     # 0 = fastest
