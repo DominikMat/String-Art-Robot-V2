@@ -9,6 +9,16 @@
 
 #define MENU_SELECTION_DEAD_ZONE_PERCENT 0.2f // extra padding on menu option potentionmeter ranges so on transition we dont get flickers
 
+extern const int SERVO_INSIDE_ANGLE;
+extern const int SERVO_OUTSIDE_ANGLE;
+extern const int STEPS_PER_FULL_STEPPER_ROTATION;
+
+// zmienne do sekwencji testowych
+int rgbTestStep = -1;
+int stepperTestStep = -1;
+int servoTestStep = -1;
+unsigned long nextTestStepMs = 0;
+
 // variables
 bool refreshScreenNextCycle = true;
 bool skipLcdClear = false;
@@ -61,9 +71,76 @@ void prepareScreenData(Screen screen) {
             // Dodajemy jawne rzutowanie na wektor przed klamrą
             currentMenuOptions = std::vector<MenuOption>{
                 MenuOption("Choose Print", []() { changeMenuScreen(PRINT_SELECT); }),
+                MenuOption("Components",   []() { changeMenuScreen(COMPONENTS); }),
                 MenuOption("Sensors",      []() { changeMenuScreen(SENSORS); }),
                 MenuOption("Settings",     []() { changeMenuScreen(SETTINGS); }),
                 MenuOption("Credits",      []() { changeMenuScreen(CREDITS); })
+            };
+            break;
+
+        case COMPONENTS: // <-- NOWY EKRAN TESTOWY
+            currentMenuOptions = std::vector<MenuOption>{
+                MenuOption("back", []() { 
+                    // Resetuj testy przy wyjściu
+                    rgbTestStep = -1; stepperTestStep = -1; servoTestStep = -1;
+                    setRGBColor(0,0,0);
+                    goBack(); 
+                }),
+                // dioda RGB
+                MenuOption("Run Test  ", []() { rgbTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    if (rgbTestStep == -1) { currentMenuOptions[1].name = "Run Test  "; return; }
+                    if (millis() < nextTestStepMs) return;
+
+                    switch(rgbTestStep) {
+                        case 0: setRGBColor(255, 0, 0);     currentMenuOptions[1].name = "Red     ";        nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 1: setRGBColor(0, 255, 0);     currentMenuOptions[1].name = "Green     ";      nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 2: setRGBColor(0, 0, 255);     currentMenuOptions[1].name = "Blue     ";       nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 3: setRGBColor(255, 255, 0);   currentMenuOptions[1].name = "RG Yellow     ";  nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 4: setRGBColor(0, 255, 255);   currentMenuOptions[1].name = "GB Cyan     ";    nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 5: setRGBColor(255, 0, 255);   currentMenuOptions[1].name = "RB Magenta     "; nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 6: setRGBColor(0, 0, 0);       currentMenuOptions[1].name = "Test Done     ";  nextTestStepMs = millis() + 1200; rgbTestStep++; break;
+                        default: rgbTestStep = -1; break;
+                    }
+                }, 50),
+                // STEPPER
+                MenuOption("Run Test  ", []() { stepperTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    if (stepperTestStep == -1) { currentMenuOptions[2].name = "Run Test  "; return; }
+                    if (millis() < nextTestStepMs) return;
+
+                    switch(stepperTestStep) {
+                        case 0:  currentMenuOptions[2].name = "Find home...      "; find_stepper_home_position(); nextTestStepMs = millis() + 1000; stepperTestStep++; break;
+                        case 1:  currentMenuOptions[2].name = "360 CW      ";       move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION, false, true);     nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 2:  currentMenuOptions[2].name = "180 CCW      ";      move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION / 2, true, true);  nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 3:  currentMenuOptions[2].name = "90 CW      ";        move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION / 4, false, true); nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 4:  currentMenuOptions[2].name = "45 CCW      ";       move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION / 8, true, true);  nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 5:  currentMenuOptions[2].name = "1 step x1      ";    move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 6:  currentMenuOptions[2].name = "1 step x2      ";    move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 7:  currentMenuOptions[2].name = "Half step x1      "; change_microstepping_mode(STEP_MODE_HALF); move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 8:  currentMenuOptions[2].name = "Half step x2      "; move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 9:  currentMenuOptions[2].name = "Quarter x1      ";   change_microstepping_mode(STEP_MODE_QUARTER); move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 10: currentMenuOptions[2].name = "Quarter x2      ";   move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 11: currentMenuOptions[2].name = "1/8 step x1      ";  change_microstepping_mode(STEP_MODE_EIGHTS); move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 12: currentMenuOptions[2].name = "1/8 step x2      ";  move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 13: currentMenuOptions[2].name = "Test Done      ";    nextTestStepMs = millis() + 1200; stepperTestStep++; change_microstepping_mode(STEP_MODE_FULL);  break;
+                        default: stepperTestStep = -1; break;
+                    }
+                }, 50),
+                // SERVO
+                MenuOption("Run Test  ", []() { servoTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    if (servoTestStep == -1) { currentMenuOptions[3].name = "Run Test  "; return; }
+                    if (millis() < nextTestStepMs) return;
+
+                    switch(servoTestStep) {
+                        case 0: servoWrite(90);                  currentMenuOptions[3].name = "Middle (90)     ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 1: servoWrite(0);                   currentMenuOptions[3].name = "0 Degrees       ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 2: servoWrite(180);                 currentMenuOptions[3].name = "180 Degrees     ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 3: servoWrite(90);                  currentMenuOptions[3].name = "Middle (90)     ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 4: servoWrite(SERVO_INSIDE_ANGLE);  currentMenuOptions[3].name = "Inner Pos      ";   nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 5: servoWrite(SERVO_OUTSIDE_ANGLE); currentMenuOptions[3].name = "Outer Pos      ";   nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 6: servoWrite(90);                  currentMenuOptions[3].name = "Test Done      ";   nextTestStepMs = millis() + 1200; servoTestStep++; break;
+                        default: servoTestStep = -1; break;
+                    }
+                }, 50)
             };
             break;
 
@@ -82,7 +159,7 @@ void prepareScreenData(Screen screen) {
                 MenuOption("Pot: 0", nullptr, []() {
                     int val = (int)(readPotentiometerRaw());
                     int val2 = (int)(readPotentiometer()*100);
-                    currentMenuOptions[3].name = "Pot:" + std::to_string(val) + " (" + std::to_string(val2) + "%) ";
+                    currentMenuOptions[4].name = "Pot:" + std::to_string(val) + " (" + std::to_string(val2) + "%) ";
                 }, 200),
             };
             break;
@@ -184,6 +261,12 @@ std::string get_menu_title(Screen scr) {
         case PROGRESS: return get_current_print_name();
         case SENSORS: return "Sensors"; 
         case PRINT_SELECT: return "Select print";
+        case COMPONENTS: {
+            if (prevSelected == 1) return "RGB LED";
+            if (prevSelected == 2) return "Stepper";
+            if (prevSelected == 3) return "Servo";
+            return "Components";
+        }
         default: return "Menu";
     }
 }

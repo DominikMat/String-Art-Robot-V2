@@ -5,6 +5,10 @@
 #include "components.h"
 #include <string>
 
+extern const int SERVO_INSIDE_ANGLE;
+extern const int SERVO_OUTSIDE_ANGLE;
+extern const int STEPS_PER_FULL_STEPPER_ROTATION;
+
 bool load_new_print_sequence (PrintSequence seq);
 int get_current_print_progress_percent();
 std::string get_current_print_name();

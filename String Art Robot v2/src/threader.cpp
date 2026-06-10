@@ -8,20 +8,15 @@ bool print_loaded = false;
 int print_progress_percent = 0;
 bool paused = false;
 
-// STEPPER PARAMS
-const float MICRO_STEP_MODE = 1; // 0.5 for half-step, 0.25 for quarter
-const float GEAR_RATIO = 4.2; // 4.2:1 gear ratio between sun gear rotation and ring gear
-const int STEPS_PER_FULL_RING_ROTATION = STEPS_PER_FULL_STEPPER_ROTATION * GEAR_RATIO / MICRO_STEP_MODE; 
-
-int nail_number = 200; 
-float steps_per_single_nail = STEPS_PER_FULL_RING_ROTATION / nail_number; 
+int nail_number = 120; 
+float steps_per_single_nail = (float)STEPS_PER_FULL_STEPPER_ROTATION / (float) nail_number; 
 
 // SERVO PARAMS
 const int SERVO_MIDDLE_ANGLE = 90;
 const int SERVO_ROTATION_ANGLE_SPAN = 30;
 const int SERVO_INSIDE_ANGLE = SERVO_MIDDLE_ANGLE - SERVO_ROTATION_ANGLE_SPAN / 2;
 const int SERVO_OUTSIDE_ANGLE = SERVO_MIDDLE_ANGLE + SERVO_ROTATION_ANGLE_SPAN / 2;
-const int SERVO_DELAY_MS = 1500;
+const int SERVO_DELAY_MS = 250;
 
 // Stan maszyny
 int current_ring_step_position = 0;
@@ -46,13 +41,6 @@ bool load_new_print_sequence(PrintSequence seq) {
         return false;
     }
 
-    // dostosuj rozklad gwozdzi
-    if (current_print.nail_number != nail_number) {
-        nail_number = current_print.nail_number;
-        steps_per_single_nail = STEPS_PER_FULL_RING_ROTATION / nail_number;
-        Serial.printf("Set new nail number for print: %d\n", nail_number);
-    }
-
     // sprawdz czy rozklad gwozdzi sie zgadza
     // if (current_print.nail_number != NUM_NAILS) {
     //     // "Nail num mismatch seq:200 set:200"
@@ -65,6 +53,17 @@ bool load_new_print_sequence(PrintSequence seq) {
     paused = false;
     print_progress_percent = 0;
     Serial.printf("Creating task for print: %s with %d nails\n", current_print.print_name.c_str(), current_print.nail_sequence.size());
+    change_microstepping_mode(STEP_MODE_QUARTER); // default microstep mode
+    find_stepper_home_position();
+    // set_stepper_motor_max_speed();
+    // set_stepper_motor_speed();
+
+    // dostosuj rozklad gwozdzi
+    if (current_print.nail_number != nail_number) {
+        nail_number = current_print.nail_number;
+        steps_per_single_nail = STEPS_PER_FULL_STEPPER_ROTATION * (int)get_current_microstep_mode() / (float)nail_number;
+        Serial.printf("Set new nail number for print: %d\n", nail_number);
+    }
 
     // Tworzymy osobny watek na drukowanie
     BaseType_t result = xTaskCreatePinnedToCore(
@@ -112,17 +111,19 @@ int get_current_ring_position() {
     return current_ring_step_position;
 }
 void set_current_ring_position(int step_position) {
-    current_ring_step_position = step_position % STEPS_PER_FULL_RING_ROTATION;
-    if (current_ring_step_position < 0) current_ring_step_position += STEPS_PER_FULL_RING_ROTATION;
+    int steps_per_rotation = STEPS_PER_FULL_STEPPER_ROTATION * (int)get_current_microstep_mode();
+    current_ring_step_position = step_position % steps_per_rotation;
+    if (current_ring_step_position < 0) current_ring_step_position += steps_per_rotation;
 }
 
 void rotate_ring_to_nail(int nail_idx) {
+    int steps_per_rotation = STEPS_PER_FULL_STEPPER_ROTATION * (int)get_current_microstep_mode();
     int target_pos = nail_idx * steps_per_single_nail;
     int diff = target_pos - current_ring_step_position;
     
     // Obliczanie najkrótszej drogi obrotu (zgodnie ze wskazówkami lub pod prąd)
-    if (diff > STEPS_PER_FULL_RING_ROTATION / 2) diff -= STEPS_PER_FULL_RING_ROTATION;
-    if (diff < -STEPS_PER_FULL_RING_ROTATION / 2) diff += STEPS_PER_FULL_RING_ROTATION;
+    if (diff > steps_per_rotation / 2) diff -= steps_per_rotation;
+    if (diff < -steps_per_rotation / 2) diff += steps_per_rotation;
 
     move_stepper_steps(abs(diff), diff > 0);
 }

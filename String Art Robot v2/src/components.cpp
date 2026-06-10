@@ -56,7 +56,7 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         #if USE_LIBRARY_PWM
             libServo.setPeriodHertz(50); // Standard 50Hz for SG90
             libServo.attach(SERVO_PIN, minimumPulseWidthUs, maximumPulseWidthUs); 
-            libServo.write(0); // middle position
+            libServo.write(90); // middle position
         #else
             pinMode(SERVO_PIN, OUTPUT);
         #endif
@@ -266,40 +266,48 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         hallValue = analogRead(HALL_INPUT_PIN);
         return hallValue;
     }
+    bool isHallActive() {
+        return hallValue == 0;
+    }
 
 /* DRV Stepper Controller (AccelStepper) */
-    #define DRV_STEP_PIN 26
-    #define DRV_DIR_PIN 27
+    #define DRV_STEP_PIN 27
+    #define DRV_DIR_PIN 26
+    #define DRV_ENABLE_PIN 4 // connected do bridged pines on DRV - RST and SLP
+    #define DRV_M0_PIN 2
+    #define DRV_M1_PIN 33
     
-    #define USE_LIBRARY_STEPPER true 
     const int STEPS_PER_FULL_STEPPER_ROTATION = 200;
     const int TARGET_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.3; // steps per second
 
-    #if USE_LIBRARY_STEPPER
-        AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
-    #endif
+    AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
+    MicrostepMode current_microstep_mode = STEP_MODE_FULL;
 
     void initStepper() {
-        #if USE_LIBRARY_STEPPER
-            stepper.setMaxSpeed(STEPS_PER_FULL_STEPPER_ROTATION * 4);
-            stepper.setAcceleration(500.0); // Opcjonalnie rampy dla płynności
-        #else
-            pinMode(DRV_STEP_PIN, OUTPUT);
-            pinMode(DRV_DIR_PIN, OUTPUT);
-        #endif
+        stepper.setMaxSpeed(STEPS_PER_FULL_STEPPER_ROTATION * 4);
+        stepper.setAcceleration(500.0);
+
+        pinMode(DRV_ENABLE_PIN, OUTPUT);
+        pinMode(DRV_M0_PIN, OUTPUT);
+        pinMode(DRV_M1_PIN, OUTPUT);
+
+        digitalWrite(DRV_ENABLE_PIN, HIGH);
+        change_microstepping_mode(current_microstep_mode);
     }
 
-    void move_stepper_steps(int step_number, bool anti_clockwise) {
+    void move_stepper_steps(int step_number, bool anti_clockwise, bool bypass_print_checks) {
         if (step_number <= 0) return;
 
-        #if USE_LIBRARY_STEPPER
-            // Obliczamy cel relatywny
-            long relative_move = anti_clockwise ? step_number : -step_number;
-            stepper.move(relative_move);
-            stepper.setSpeed(TARGET_STEPPER_SPEED);
+        // Obliczamy cel relatywny
+        long relative_move = anti_clockwise ? step_number : -step_number;
+        stepper.setMaxSpeed(TARGET_STEPPER_SPEED);
+        stepper.move(relative_move);
 
-            while (stepper.distanceToGo() != 0) {
-                // Reakcja na STOP lub PAUZE
+        unsigned long last_watchdog_yield = millis();
+
+        // petla na ruch silnika
+        while (stepper.distanceToGo() != 0) {
+            if (!bypass_print_checks) {
                 if (!is_print_loaded()) {
                     stepper.stop(); 
                     return;
@@ -307,33 +315,110 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
                 while (is_printing_paused() && is_print_loaded()) {
                     vTaskDelay(50 / portTICK_PERIOD_MS);
                 }
-
-                stepper.runSpeedToPosition();
             }
-            
-        #else
-            digitalWrite(DRV_DIR_PIN, anti_clockwise ? HIGH : LOW);
 
-            for (int i = 0; i < step_number; i++) {
-                // Obsługa PAUZY i STOPU
-                while (is_printing_paused() && is_print_loaded()) {
-                    vTaskDelay(50 / portTICK_PERIOD_MS);
-                }
-                if (!is_print_loaded()) return;
+            stepper.run();
 
-                // Krok
-                digitalWrite(DRV_STEP_PIN, HIGH);
-                delayMicroseconds(2); 
-                digitalWrite(DRV_STEP_PIN, LOW);
-                
-                // Kontrola prędkości i oddanie czasu dla systemu (Watchdog)
-                delayMicroseconds(STEP_DELAY_MICROSECONDS);
-                if (i % 20 == 0) vTaskDelay(1); 
+            // Oddanie czasu dla FreeRTOS (Watchdog), żeby nie resetowało ESP32
+            if (millis() - last_watchdog_yield > 15) {
+                taskYIELD();
+                last_watchdog_yield = millis();
             }
-        #endif
+        }
 
-        // aktualizacja pozycji globalna
+        // Aktualizacja pozycji w Threader.cpp
         int move = anti_clockwise ? step_number : -step_number;
         set_current_ring_position(get_current_ring_position() + move);
+    }
+
+    void change_microstepping_mode(MicrostepMode microstep_mode) {
+        switch (microstep_mode) {
+            case STEP_MODE_FULL:
+                digitalWrite(DRV_M0_PIN, LOW);
+                digitalWrite(DRV_M1_PIN, LOW);
+                break;
+            case STEP_MODE_HALF:
+                digitalWrite(DRV_M0_PIN, HIGH);
+                digitalWrite(DRV_M1_PIN, LOW);
+                break;
+            case STEP_MODE_QUARTER:
+                digitalWrite(DRV_M0_PIN, LOW);
+                digitalWrite(DRV_M1_PIN, HIGH);
+                break;
+            case STEP_MODE_EIGHTS:
+                digitalWrite(DRV_M0_PIN, HIGH);
+                digitalWrite(DRV_M1_PIN, HIGH);
+                break;
+        }
+        // Krótkie opóźnienie, aby sterownik ustabilizował prąd na cewkach po zmianie
+        vTaskDelay(5 / portTICK_PERIOD_MS);
+    }
+    MicrostepMode get_current_microstep_mode() {
+        return current_microstep_mode;
+    }
+
+    void find_stepper_home_position() {
+        Serial.println("Rozpoczynam szukanie punktu ZERO (Homing)...");
+
+        MicrostepMode curr_mode = get_current_microstep_mode();
+        change_microstepping_mode(STEP_MODE_EIGHTS);
+        float homing_speed = 200.0;
+        stepper.setMaxSpeed(homing_speed);
+
+        // Jeśli wystartowaliśmy dokładnie nad magnesem - zchodzmiy
+        readHallSensor();
+        if (isHallActive()) {
+            stepper.setSpeed(-homing_speed); // Kręcimy w tył (CCW)
+            while (isHallActive()) {
+                stepper.runSpeed();
+                readHallSensor(); 
+                taskYIELD();
+            }
+            stepper.move(-100);
+            while (stepper.distanceToGo() != 0) { stepper.run(); taskYIELD(); }
+        }
+
+        // Szukamy KRAWĘDZI 1 (Momentu, w którym magnes zaczyna działać)
+        stepper.setSpeed(homing_speed); // Kręcimy w przód (CW)
+        while (!isHallActive()) {
+            stepper.runSpeed();
+            readHallSensor();
+            taskYIELD();
+        }
+        long edge1 = stepper.currentPosition();
+        Serial.printf("Krawędź 1 znaleziona na kroku: %ld\n", edge1);
+
+        // 4. Jedziemy dalej w tym samym kierunku, aż wyjedziemy za magnes (Szukamy KRAWĘDZI 2)
+        while (isHallActive()) {
+            stepper.runSpeed();
+            readHallSensor();
+            taskYIELD();
+        }
+        long edge2 = stepper.currentPosition();
+        Serial.printf("Krawędź 2 znaleziona na kroku: %ld\n", edge2);
+
+        // 5. Obliczamy idealny geometryczny środek magnesu!
+        long center_position = (edge1 + edge2) / 2;
+        Serial.printf("Idealny środek obliczony na krok: %ld\n", center_position);
+
+        // 6. Cofamy się dokładnie na wyliczony środek
+        stepper.moveTo(center_position);
+        stepper.setMaxSpeed(400.0);
+        stepper.setAcceleration(200.0); // Włączamy akcelerację dla płynnego powrotu
+        
+        while (stepper.distanceToGo() != 0) {
+            stepper.run();
+            taskYIELD();
+        }
+
+        // 7. Jesteśmy w idealnym "DOMU"! Zapisujemy pozycję jako zero.
+        stepper.setCurrentPosition(0);
+        set_current_ring_position(0); // Synchronizujemy z zewnętrznym licznikiem w Threaderze
+
+        // 8. Powrót do standardowego trybu pracy (Pełny krok)
+        // Zmień to, jeśli drukujesz w innym domyślnym trybie mikrokrokowym
+        change_microstepping_mode(curr_mode);
+        
+        Serial.println("Homing zakończony sukcesem!");
     }
 

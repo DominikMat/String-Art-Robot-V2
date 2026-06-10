@@ -40,6 +40,13 @@ struct PrintSequence {
     std::vector<int> nail_sequence;
 };
 
+enum MicrostepMode {
+    STEP_MODE_FULL = 1,
+    STEP_MODE_HALF = 2,
+    STEP_MODE_QUARTER = 4,
+    STEP_MODE_EIGHTS = 8
+};
+
 // Prototypy funkcji
 void initLcd();
 void initServo();
@@ -58,7 +65,10 @@ int readHallSensor();
 void initStepper();
 void setRGBColor(int r, int g, int b);
 void set_rgb_specified_colour(RGBColour colour);
-void move_stepper_steps(int steps, bool dir);
+void move_stepper_steps(int step_number, bool anti_clockwise, bool bypass_print_checks = false);
+void change_microstepping_mode(MicrostepMode microstep_mode);
+MicrostepMode get_current_microstep_mode();
+void find_stepper_home_position();
 
 std::vector<std::string> readPrintableFileNames();
 PrintSequence generatePrintSequenceFromFile(std::string filename);
