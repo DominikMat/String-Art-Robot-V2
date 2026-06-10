@@ -9,9 +9,8 @@ int print_progress_percent = 0;
 bool paused = false;
 
 // STEPPER PARAMS
-const float MICRO_STEP_MODE = 1; // 0.5 for half-step, 0.25 for quarter
-const float GEAR_RATIO = 4.2; // 4.2:1 gear ratio between sun gear rotation and ring gear
-const int STEPS_PER_FULL_RING_ROTATION = STEPS_PER_FULL_STEPPER_ROTATION * GEAR_RATIO / MICRO_STEP_MODE; 
+#define GEAR_RATIO 1.0 // no gears
+#define STEPS_PER_FULL_RING_ROTATION (STEPS_PER_FULL_STEPPER_ROTATION * GEAR_RATIO * (int)(get_current_microstep_mode())) 
 
 int nail_number = 200; 
 float steps_per_single_nail = STEPS_PER_FULL_RING_ROTATION / nail_number; 
@@ -112,8 +111,9 @@ int get_current_ring_position() {
     return current_ring_step_position;
 }
 void set_current_ring_position(int step_position) {
-    current_ring_step_position = step_position % STEPS_PER_FULL_RING_ROTATION;
-    if (current_ring_step_position < 0) current_ring_step_position += STEPS_PER_FULL_RING_ROTATION;
+    int steps_per_ring_rotation = (int)(STEPS_PER_FULL_RING_ROTATION);
+    current_ring_step_position = step_position % steps_per_ring_rotation;
+    if (current_ring_step_position < 0) current_ring_step_position += steps_per_ring_rotation;
 }
 
 void rotate_ring_to_nail(int nail_idx) {
@@ -121,8 +121,9 @@ void rotate_ring_to_nail(int nail_idx) {
     int diff = target_pos - current_ring_step_position;
     
     // Obliczanie najkrótszej drogi obrotu (zgodnie ze wskazówkami lub pod prąd)
-    if (diff > STEPS_PER_FULL_RING_ROTATION / 2) diff -= STEPS_PER_FULL_RING_ROTATION;
-    if (diff < -STEPS_PER_FULL_RING_ROTATION / 2) diff += STEPS_PER_FULL_RING_ROTATION;
+    int steps_per_ring_rotation = (int)(STEPS_PER_FULL_RING_ROTATION);
+    if (diff > steps_per_ring_rotation / 2) diff -= steps_per_ring_rotation;
+    if (diff < -steps_per_ring_rotation / 2) diff += steps_per_ring_rotation;
 
     move_stepper_steps(abs(diff), diff > 0);
 }

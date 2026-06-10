@@ -56,7 +56,7 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         #if USE_LIBRARY_PWM
             libServo.setPeriodHertz(50); // Standard 50Hz for SG90
             libServo.attach(SERVO_PIN, minimumPulseWidthUs, maximumPulseWidthUs); 
-            libServo.write(0); // middle position
+            libServo.write(90); // middle position
         #else
             pinMode(SERVO_PIN, OUTPUT);
         #endif
@@ -270,15 +270,38 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
 /* DRV Stepper Controller (AccelStepper) */
     #define DRV_STEP_PIN 26
     #define DRV_DIR_PIN 27
-    
+    #define DRV_M0_PIN 2
+    #define DRV_M1_PIN 33
+    #define DRV_SLP_PIN 4
+
     #define USE_LIBRARY_STEPPER true 
     const int STEPS_PER_FULL_STEPPER_ROTATION = 200;
     const int TARGET_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.3; // steps per second
+    MicrostepMode current_microstep_mode = MicrostepMode::FULL_STEP;
 
     #if USE_LIBRARY_STEPPER
         AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
     #endif
 
+    void setMicrostepMode(MicrostepMode mode) {
+        switch(mode) {
+            case FULL_STEP: 
+                digitalWrite(DRV_M0_PIN, LOW);
+                digitalWrite(DRV_M1_PIN, LOW);
+                break;
+            case HALF_STEP: 
+                digitalWrite(DRV_M0_PIN, HIGH);
+                digitalWrite(DRV_M1_PIN, LOW);
+                break;
+            case QUARTER_STEP: 
+                digitalWrite(DRV_M0_PIN, LOW);
+                digitalWrite(DRV_M1_PIN, HIGH);
+                break;
+            case EIGHTS_STEP:
+                digitalWrite(DRV_M0_PIN, HIGH);
+                digitalWrite(DRV_M1_PIN, HIGH);
+        }
+    }
     void initStepper() {
         #if USE_LIBRARY_STEPPER
             stepper.setMaxSpeed(STEPS_PER_FULL_STEPPER_ROTATION * 4);
@@ -287,8 +310,16 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
             pinMode(DRV_STEP_PIN, OUTPUT);
             pinMode(DRV_DIR_PIN, OUTPUT);
         #endif
-    }
 
+        // set microstep mode
+        pinMode(DRV_M0_PIN, OUTPUT);
+        pinMode(DRV_M1_PIN, OUTPUT);
+        setMicrostepMode(current_microstep_mode);
+        
+        // wake up board
+        pinMode(DRV_SLP_PIN, OUTPUT);
+        digitalWrite(DRV_SLP_PIN, HIGH);
+    }
     void move_stepper_steps(int step_number, bool anti_clockwise) {
         if (step_number <= 0) return;
 
@@ -336,4 +367,6 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         int move = anti_clockwise ? step_number : -step_number;
         set_current_ring_position(get_current_ring_position() + move);
     }
-
+    MicrostepMode get_current_microstep_mode() {
+        return current_microstep_mode;
+    }
