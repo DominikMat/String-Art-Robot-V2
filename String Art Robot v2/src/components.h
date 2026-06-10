@@ -33,6 +33,13 @@ enum RGBColour {
     COLOUR_ALERT           // fiolet taki
 };
 
+enum MicrostepMode {
+    FULL_STEP = 1,
+    HALF_STEP = 2,
+    QUARTER_STEP = 4,
+    EIGHTS_STEP = 8
+};
+
 struct PrintSequence {
     int nail_number = 0;
     int sequence_length = 0;

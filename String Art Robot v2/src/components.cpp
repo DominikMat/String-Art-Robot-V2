@@ -56,7 +56,7 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         #if USE_LIBRARY_PWM
             libServo.setPeriodHertz(50); // Standard 50Hz for SG90
             libServo.attach(SERVO_PIN, minimumPulseWidthUs, maximumPulseWidthUs); 
-            libServo.write(90); // middle position
+            libServo.write(990); // middle position
         #else
             pinMode(SERVO_PIN, OUTPUT);
         #endif
@@ -279,9 +279,7 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
     
     const int STEPS_PER_FULL_STEPPER_ROTATION = 200;
     const int TARGET_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.3; // steps per second
-
-    AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
-    MicrostepMode current_microstep_mode = STEP_MODE_FULL;
+    MicrostepMode current_microstep_mode = MicrostepMode::FULL_STEP;
 
     void initStepper() {
         stepper.setMaxSpeed(STEPS_PER_FULL_STEPPER_ROTATION * 4);
