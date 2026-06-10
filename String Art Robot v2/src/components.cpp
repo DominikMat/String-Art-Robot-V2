@@ -279,7 +279,8 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
     
     const int STEPS_PER_FULL_STEPPER_ROTATION = 200;
     const int TARGET_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.3; // steps per second
-    MicrostepMode current_microstep_mode = MicrostepMode::FULL_STEP;
+    MicrostepMode current_microstep_mode = MicrostepMode::STEP_MODE_FULL;
+    AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
 
     void initStepper() {
         stepper.setMaxSpeed(STEPS_PER_FULL_STEPPER_ROTATION * 4);
