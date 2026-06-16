@@ -56,7 +56,7 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         #if USE_LIBRARY_PWM
             libServo.setPeriodHertz(50); // Standard 50Hz for SG90
             libServo.attach(SERVO_PIN, minimumPulseWidthUs, maximumPulseWidthUs); 
-            libServo.write(990); // middle position
+            libServo.write(SERVO_INSIDE_ANGLE); // default pos
         #else
             pinMode(SERVO_PIN, OUTPUT);
         #endif
@@ -116,14 +116,14 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         setRGBColor(0, 0, 0);
     }
     void setRGBColor(int r, int g, int b) {
-        Serial.printf("Setting rgb diode colour: RGB(%d,%d,%d)",r,g,b);
+        // Serial.printf("Setting rgb diode colour: RGB(%d,%d,%d)\n",r,g,b);
         analogWrite(LED_R, r);
         analogWrite(LED_G, g);
         analogWrite(LED_B, b);
     }
     void set_rgb_specified_colour(RGBColour colour) {
         switch (colour) {
-            case COLOUR_PRINTING:       setRGBColor(0, 0, 255);   break; // Niebieski - pracuje
+            case COLOUR_PRINTING:       setRGBColor(0, 0, 65);   break; // Brak (PREV Niebieski - pracuje)
             case COLOUR_PRINT_COMPLETE: setRGBColor(0, 150, 0);   break; // Ciemniejszy zielony
             case COLOUR_PRINT_PAUSED:   setRGBColor(255, 100, 0); break; // Jasny pomarańczowy
             case COLOUR_PRINT_STOPPED:  setRGBColor(255, 20, 0);  break; // Czerwono-pomarańczowy
@@ -146,6 +146,7 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         if (interruptTime - lastButton1Press > debounceDelay) { 
             isButtonPressed = true;
             lastButton1Press = interruptTime;
+            Serial.println("button pressed!");
         }
     }
     void initButton() {
@@ -256,9 +257,6 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
     #define HALL_INPUT_PIN 35
     int hallValue = 0;
 
-    const int TARGET_STEPPER_RPM = 10;
-    const int STEP_DELAY_MICROSECONDS = (60 / TARGET_STEPPER_RPM) * 1000 * 1000 / 4096; 
-
     void initHallSensor() {
         pinMode(HALL_INPUT_PIN, INPUT);
     }
@@ -276,10 +274,15 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
     #define DRV_ENABLE_PIN 4 // connected do bridged pines on DRV - RST and SLP
     #define DRV_M0_PIN 2
     #define DRV_M1_PIN 33
+
+    // const int TARGET_STEPPER_RPM = 10;
+    // const int STEP_DELAY_MICROSECONDS = (60 / TARGET_STEPPER_RPM) * 1000 * 1000 / 4096; 
+    const float STEPPER_HOME_MOVEMENT_OFFSET = -2 * (1/8.0f); // 2 steps anti-clockwise
+    const float STEPPER_HOME_POSITION_OFFSET = 0.62 * (1/8.0f) ; // tiny clockwise offset
     
-    const int STEPS_PER_FULL_STEPPER_ROTATION = 200;
-    const int TARGET_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.3; // steps per second
-    MicrostepMode current_microstep_mode = MicrostepMode::STEP_MODE_FULL;
+    const int STEPS_PER_FULL_STEPPER_ROTATION = 100;
+    const int DEFAULT_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.225; // steps per second
+    MicrostepMode current_microstep_mode = MicrostepMode::STEP_MODE_EIGHTS;
     AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
 
     void initStepper() {
@@ -294,16 +297,16 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
         change_microstepping_mode(current_microstep_mode);
     }
 
-    void move_stepper_steps(int step_number, bool anti_clockwise, bool bypass_print_checks) {
+    void move_stepper_steps(float step_number, bool anti_clockwise, bool bypass_print_checks) {
         if (step_number <= 0) return;
 
         // Obliczamy cel relatywny
-        long relative_move = anti_clockwise ? step_number : -step_number;
-        stepper.setMaxSpeed(TARGET_STEPPER_SPEED);
+        int relative_move = round((float)(anti_clockwise ? step_number : -step_number) * (int)current_microstep_mode);  
+        stepper.setMaxSpeed(DEFAULT_STEPPER_SPEED * (int)current_microstep_mode);
         stepper.move(relative_move);
-
+        
         unsigned long last_watchdog_yield = millis();
-
+        
         // petla na ruch silnika
         while (stepper.distanceToGo() != 0) {
             if (!bypass_print_checks) {
@@ -317,23 +320,27 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
             }
 
             stepper.run();
-
+            
             // Oddanie czasu dla FreeRTOS (Watchdog), żeby nie resetowało ESP32
-            if (millis() - last_watchdog_yield > 15) {
+            if (millis() - last_watchdog_yield > 10) {
                 taskYIELD();
                 last_watchdog_yield = millis();
             }
         }
 
         // Aktualizacja pozycji w Threader.cpp
-        int move = anti_clockwise ? step_number : -step_number;
-        set_current_ring_position(get_current_ring_position() + move);
+        float actual_move = relative_move / (float)(int)current_microstep_mode;
+        change_current_ring_position(-actual_move);
+
+        Serial.printf("Moved stepper with step number: %f (curr microstep mode: %d * 1/%d) out of %f \n", actual_move, relative_move, (int)current_microstep_mode, step_number);
     }
 
     void change_microstepping_mode(MicrostepMode microstep_mode) {
+        current_microstep_mode = microstep_mode;
+        
         switch (microstep_mode) {
             case STEP_MODE_FULL:
-                digitalWrite(DRV_M0_PIN, LOW);
+            digitalWrite(DRV_M0_PIN, LOW);
                 digitalWrite(DRV_M1_PIN, LOW);
                 break;
             case STEP_MODE_HALF:
@@ -377,7 +384,6 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
             while (stepper.distanceToGo() != 0) { stepper.run(); taskYIELD(); }
         }
 
-        // Szukamy KRAWĘDZI 1 (Momentu, w którym magnes zaczyna działać)
         stepper.setSpeed(homing_speed); // Kręcimy w przód (CW)
         while (!isHallActive()) {
             stepper.runSpeed();
@@ -385,22 +391,19 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
             taskYIELD();
         }
         long edge1 = stepper.currentPosition();
-        Serial.printf("Krawędź 1 znaleziona na kroku: %ld\n", edge1);
+        //Serial.printf("Krawędź 1 znaleziona na kroku: %ld\n", edge1);
 
-        // 4. Jedziemy dalej w tym samym kierunku, aż wyjedziemy za magnes (Szukamy KRAWĘDZI 2)
         while (isHallActive()) {
             stepper.runSpeed();
             readHallSensor();
             taskYIELD();
         }
         long edge2 = stepper.currentPosition();
-        Serial.printf("Krawędź 2 znaleziona na kroku: %ld\n", edge2);
+        //Serial.printf("Krawędź 2 znaleziona na kroku: %ld\n", edge2);
 
-        // 5. Obliczamy idealny geometryczny środek magnesu!
         long center_position = (edge1 + edge2) / 2;
-        Serial.printf("Idealny środek obliczony na krok: %ld\n", center_position);
+        //Serial.printf("Idealny środek obliczony na krok: %ld\n", center_position);
 
-        // 6. Cofamy się dokładnie na wyliczony środek
         stepper.moveTo(center_position);
         stepper.setMaxSpeed(400.0);
         stepper.setAcceleration(200.0); // Włączamy akcelerację dla płynnego powrotu
@@ -410,14 +413,11 @@ byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0
             taskYIELD();
         }
 
-        // 7. Jesteśmy w idealnym "DOMU"! Zapisujemy pozycję jako zero.
-        stepper.setCurrentPosition(0);
-        set_current_ring_position(0); // Synchronizujemy z zewnętrznym licznikiem w Threaderze
+        // set 0 position after applying offset
+        move_stepper_steps(abs(STEPPER_HOME_MOVEMENT_OFFSET), STEPPER_HOME_MOVEMENT_OFFSET < 0, true);
+        // stepper.setCurrentPosition(-STEPPER_HOME_POSITION_OFFSET);
+        set_current_ring_position(STEPPER_HOME_POSITION_OFFSET); // Synchronizujemy z zewnętrznym licznikiem w Threaderze
 
-        // 8. Powrót do standardowego trybu pracy (Pełny krok)
-        // Zmień to, jeśli drukujesz w innym domyślnym trybie mikrokrokowym
-        change_microstepping_mode(curr_mode);
-        
+        change_microstepping_mode(curr_mode); // ustaw poprzedni tryb microstepping        
         Serial.println("Homing zakończony sukcesem!");
     }
-

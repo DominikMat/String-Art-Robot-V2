@@ -1,0 +1,1464 @@
+======================================================================
+*** FILE: components.h ***
+======================================================================
+
+#ifndef COMPONENTS_H
+#define COMPONENTS_H
+
+#include <Arduino.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
+#include <ESP32Servo.h>
+#include <SD.h> 
+#include <AccelStepper.h>
+#include <vector>
+
+// Deklaracje zmiennych globalnych (używamy extern, by były widoczne w main)
+extern LiquidCrystal_I2C lcd;
+extern const int STEPS_PER_FULL_STEPPER_ROTATION;
+
+enum LCDCustomChars {
+    CHAR_INVERTED_LESS = 0, 
+    CHAR_INVERTED_DASH = 1,
+    CHAR_DOT = 2,           
+    CHAR_INVERTED_DOT = 3, 
+    CHAR_PAUSE = 4, 
+    CHAR_INVERTED_PAUSE = 5
+};
+
+enum RGBColour {
+    COLOUR_PRINTING,       // Druk w toku
+    COLOUR_PRINT_COMPLETE, // Zielony
+    COLOUR_PRINT_PAUSED,   // Pomarańczowy
+    COLOUR_PRINT_STOPPED,  // Czerwono-pomarańczowy
+    COLOUR_READY,          // Cyjan / Jasny niebieski
+    COLOUR_ERROR,          // Czerwony
+    COLOUR_CLEAR,          // Wyłączony
+    COLOUR_ALERT           // fiolet taki
+};
+
+struct PrintSequence {
+    int nail_number = 0;
+    int sequence_length = 0;
+    std::string print_name;
+    std::vector<int> nail_sequence;
+};
+
+enum MicrostepMode {
+    STEP_MODE_FULL = 1,
+    STEP_MODE_HALF = 2,
+    STEP_MODE_QUARTER = 4,
+    STEP_MODE_EIGHTS = 8
+};
+
+// Prototypy funkcji
+void initLcd();
+void initServo();
+void loopServo();
+void servoWrite(int angleDeg);
+void initPotentiometer();
+float readPotentiometer();
+int readPotentiometerRaw();
+void initLed();
+void setRGBColor(int r, int g, int b);
+void initButton();
+bool checkButtonPressed();
+void initSDReader();
+void initHallSensor();
+int readHallSensor();
+void initStepper();
+void setRGBColor(int r, int g, int b);
+void set_rgb_specified_colour(RGBColour colour);
+void move_stepper_steps(float step_number, bool anti_clockwise, bool bypass_print_checks = false);
+void change_microstepping_mode(MicrostepMode microstep_mode);
+MicrostepMode get_current_microstep_mode();
+void find_stepper_home_position();
+
+std::vector<std::string> readPrintableFileNames();
+PrintSequence generatePrintSequenceFromFile(std::string filename);
+
+#endif
+
+======================================================================
+*** FILE: threader.h ***
+======================================================================
+
+
+#ifndef THREADER_H
+#define THREADER_H
+
+#include "components.h"
+#include <string>
+
+extern const int SERVO_INSIDE_ANGLE;
+extern const int SERVO_OUTSIDE_ANGLE;
+extern const int STEPS_PER_FULL_STEPPER_ROTATION;
+
+bool load_new_print_sequence (PrintSequence seq);
+int get_current_print_progress_percent();
+std::string get_current_print_name();
+
+void pause_printing(bool state);
+void stop_printing();
+bool is_printing_paused();
+bool is_print_loaded();
+int get_next_nail_num();
+float calculate_total_string_length_meters(PrintSequence seq, float ring_diameter_mm = 250.0f);
+void wait_ms(int ms);
+
+float get_current_ring_position();
+void set_current_ring_position(float pos);
+void change_current_ring_position(float steps);
+
+void rotate_ring_to_nail(int nail_idx, bool bypass_print_checks = false);
+void plot_around_nail(int nail_idx);
+
+void set_printing_error(std::string line1, std::string line2 = "");
+void printTask(void *params);
+
+#endif
+
+======================================================================
+*** FILE: lcd_menu.cpp ***
+======================================================================
+
+
+#include "components.h"
+#include "lcd_menu.h"
+#include "threader.h"
+#include <string>
+#include <vector>
+
+#define max(a,b) (a > b ? a : b)
+
+#define MENU_SELECTION_DEAD_ZONE_PERCENT 0.2f // extra padding on menu option potentionmeter ranges so on transition we dont get flickers
+
+extern const int SERVO_INSIDE_ANGLE;
+extern const int SERVO_OUTSIDE_ANGLE;
+extern const int STEPS_PER_FULL_STEPPER_ROTATION;
+
+// zmienne do sekwencji testowych
+int rgbTestStep = -1;
+int stepperTestStep = -1;
+int servoTestStep = -1;
+unsigned long nextTestStepMs = 0;
+int homeingTestStep = -1;
+int nailSpacingTestStep = -1;
+
+// variables
+bool refreshScreenNextCycle = true;
+bool skipLcdClear = false;
+int prevSelected = -1;
+Screen currentScreen = Screen::MAIN;
+std::vector<Screen> screenHistory;
+unsigned long lastUpdateMs = 0;
+
+// Alerty
+bool isAlertActive = false;
+unsigned long alertEndTime = 0;
+std::string alertMessage = "";
+
+// Zmienne dla PROGRESS
+std::string currentPrintFilename = "";
+int printProgressPercent = 0;
+
+// listy menu
+std::vector<MenuOption> currentMenuOptions;
+extern std::vector<MenuOption> sensorMenu;
+
+/* callbacki na klikniecie */
+void showAlert(std::string msg_line_1, std::string msg_line_2, unsigned long durationMs) {
+    alertMessage = msg_line_1+msg_line_2;
+    alertEndTime = millis() + durationMs;
+    isAlertActive = true;
+    lcd.clear();
+    lcd.setCursor(max(0,(16-msg_line_1.size())/2), 0); // wysrodkowanie
+    lcd.print(msg_line_1.c_str());
+    lcd.setCursor(max(0,(16-msg_line_2.size())/2),1); // wysrodkowanie
+    lcd.print(msg_line_2.c_str());
+    set_rgb_specified_colour(RGBColour::COLOUR_ALERT);
+
+    Serial.printf("Displaying alert msg: \n - %s - %s \n", msg_line_1.c_str(), msg_line_2.c_str());
+}
+
+void actionStartPrint(std::string filename) {
+    PrintSequence seq = generatePrintSequenceFromFile(filename);
+    if (load_new_print_sequence(seq)){
+        Serial.printf("Rozpoczynam wydruk: %s. Kroków: %d (%d) dla Gwozdzi:%d\n", seq.print_name.c_str(), seq.nail_sequence.size(), seq.sequence_length, seq.nail_number);
+        changeMenuScreen(PROGRESS);
+    } else {
+        Serial.println("Nie udalo sie rozpoczac wydruku");
+        changeMenuScreen(PRINT_SELECT);
+    }
+}
+void prepareScreenData(Screen screen) {
+    currentMenuOptions.clear();
+
+    switch (screen) {
+        case MAIN:
+            // Dodajemy jawne rzutowanie na wektor przed klamrą
+            currentMenuOptions = std::vector<MenuOption>{
+                MenuOption("Choose Print", []() { changeMenuScreen(PRINT_SELECT); }),
+                MenuOption("Components",   []() { changeMenuScreen(COMPONENTS); }),
+                MenuOption("Sensors",      []() { changeMenuScreen(SENSORS); }),
+                MenuOption("Settings",     []() { changeMenuScreen(SETTINGS); }),
+                MenuOption("Credits",      []() { changeMenuScreen(CREDITS); })
+            };
+            break;
+
+        case COMPONENTS: // <-- NOWY EKRAN TESTOWY
+            currentMenuOptions = std::vector<MenuOption>{
+                MenuOption("back", []() { 
+                    // Resetuj testy przy wyjściu
+                    rgbTestStep = -1; stepperTestStep = -1; servoTestStep = -1;
+                    setRGBColor(0,0,0);
+                    goBack(); 
+                }),
+                // dioda RGB
+                MenuOption("Run Test  ", []() { rgbTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    if (rgbTestStep == -1) { currentMenuOptions[1].name = "Run Test  "; return; }
+                    if (millis() < nextTestStepMs) return;
+
+                    switch(rgbTestStep) {
+                        case 0: setRGBColor(255, 0, 0);     currentMenuOptions[1].name = "Red     ";        nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 1: setRGBColor(0, 255, 0);     currentMenuOptions[1].name = "Green     ";      nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 2: setRGBColor(0, 0, 255);     currentMenuOptions[1].name = "Blue     ";       nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 3: setRGBColor(255, 255, 0);   currentMenuOptions[1].name = "RG Yellow     ";  nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 4: setRGBColor(0, 255, 255);   currentMenuOptions[1].name = "GB Cyan     ";    nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 5: setRGBColor(255, 0, 255);   currentMenuOptions[1].name = "RB Magenta     "; nextTestStepMs = millis() + 800;  rgbTestStep++; break;
+                        case 6: setRGBColor(0, 0, 0);       currentMenuOptions[1].name = "Test Done     ";  nextTestStepMs = millis() + 1200; rgbTestStep++; break;
+                        default: rgbTestStep = -1; break;
+                    }
+                }, 50),
+                // STEPPER
+                MenuOption("Run Test  ", []() { stepperTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    if (stepperTestStep == -1) { currentMenuOptions[2].name = "Run Test  "; return; }
+                    if (millis() < nextTestStepMs) return;
+
+                    switch(stepperTestStep) {
+                        case 0:  currentMenuOptions[2].name = "Find home...      "; find_stepper_home_position(); nextTestStepMs = millis() + 1000; stepperTestStep++; break;
+                        case 1:  currentMenuOptions[2].name = "360 CW      ";       move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION, false, true);     nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 2:  currentMenuOptions[2].name = "180 CCW      ";      move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION / 2, true, true);  nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 3:  currentMenuOptions[2].name = "90 CW      ";        move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION / 4, false, true); nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 4:  currentMenuOptions[2].name = "45 CCW      ";       move_stepper_steps(STEPS_PER_FULL_STEPPER_ROTATION / 8, true, true);  nextTestStepMs = millis() + 400; stepperTestStep++; break;
+                        case 5:  currentMenuOptions[2].name = "1 step x1      ";    move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 6:  currentMenuOptions[2].name = "1 step x2      ";    move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 7:  currentMenuOptions[2].name = "Half step x1      "; change_microstepping_mode(STEP_MODE_HALF); move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 8:  currentMenuOptions[2].name = "Half step x2      "; move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 9:  currentMenuOptions[2].name = "Quarter x1      ";   change_microstepping_mode(STEP_MODE_QUARTER); move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 10: currentMenuOptions[2].name = "Quarter x2      ";   move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 11: currentMenuOptions[2].name = "1/8 step x1      ";  change_microstepping_mode(STEP_MODE_EIGHTS); move_stepper_steps(1, false, true); nextTestStepMs = millis() + 300; stepperTestStep++; break;
+                        case 12: currentMenuOptions[2].name = "1/8 step x2      ";  move_stepper_steps(1, false, true); nextTestStepMs = millis() + 600; stepperTestStep++; break;
+                        case 13: currentMenuOptions[2].name = "Test Done      ";    nextTestStepMs = millis() + 1200; stepperTestStep++; change_microstepping_mode(STEP_MODE_FULL);  break;
+                        default: stepperTestStep = -1; break;
+                    }
+                }, 50),
+                // SERVO
+                MenuOption("Run Test  ", []() { servoTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    if (servoTestStep == -1) { currentMenuOptions[3].name = "Run Test  "; return; }
+                    if (millis() < nextTestStepMs) return;
+
+                    switch(servoTestStep) {
+                        case 0: servoWrite(90);                  currentMenuOptions[3].name = "Middle (90)     ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 1: servoWrite(0);                   currentMenuOptions[3].name = "0 Degrees       ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 2: servoWrite(180);                 currentMenuOptions[3].name = "180 Degrees     ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 3: servoWrite(90);                  currentMenuOptions[3].name = "Middle (90)     ";  nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 4: servoWrite(SERVO_INSIDE_ANGLE);  currentMenuOptions[3].name = "Inner Pos      ";   nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 5: servoWrite(SERVO_OUTSIDE_ANGLE); currentMenuOptions[3].name = "Outer Pos      ";   nextTestStepMs = millis() + 800;  servoTestStep++; break;
+                        case 6: servoWrite(90);                  currentMenuOptions[3].name = "Test Done      ";   nextTestStepMs = millis() + 1200; servoTestStep++; break;
+                        default: servoTestStep = -1; break;
+                    }
+                }, 50),
+                // HOMEING TEST
+                MenuOption("Find home pos  ", []() { find_stepper_home_position(); }),
+
+                // NAIL SPACING TEST
+                MenuOption("Run Test  ", []() { nailSpacingTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    
+                    if (nailSpacingTestStep == -1) { currentMenuOptions[5].name = "Run Test  "; return; }
+                    if (isAlertActive) return;
+                    if (nailSpacingTestStep >= 120) { nailSpacingTestStep = -1; return; } 
+                    
+                    // start and end conditions
+                    if (nailSpacingTestStep == 0) {
+                        servoWrite(SERVO_INSIDE_ANGLE);
+                        find_stepper_home_position(); // go to nail 0 position
+                        showAlert("At nail zero", "(home pos)", 1000000);
+                    } 
+                    
+                    // nail logic
+                    else {
+                        rotate_ring_to_nail(nailSpacingTestStep, true);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_OUTSIDE_ANGLE);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_INSIDE_ANGLE);
+
+                        std::string line2 = "Nail: " + std::to_string(nailSpacingTestStep) + "/120";
+                        showAlert("Testing gap...", line2, 1000000);
+                    }
+
+                    // progress step
+                    nailSpacingTestStep++;            
+                }, 50),
+
+                // NAIL SPACING TEST 2
+                MenuOption("Run Test  ", []() { nailSpacingTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    
+                    if (nailSpacingTestStep == -1) { currentMenuOptions[6].name = "Run Test  "; return; }
+                    if (isAlertActive) return;
+                    if (nailSpacingTestStep >= 24) { nailSpacingTestStep = -1; return; } 
+                    
+                    // start and end conditions
+                    if (nailSpacingTestStep == 0) {
+                        servoWrite(SERVO_INSIDE_ANGLE);
+                        find_stepper_home_position(); // go to nail 0 position
+                        showAlert("At nail zero", "(home pos)", 1000000);
+                    } 
+                    
+                    // nail logic
+                    else {
+                        int nail_idx = (nailSpacingTestStep * 25) % 120;
+                        rotate_ring_to_nail(nail_idx, true);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_OUTSIDE_ANGLE);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_INSIDE_ANGLE);
+
+                        std::string line2 = "Nail: " + std::to_string(nail_idx) + "/120";
+                        showAlert("Testing gap...", line2, 1000000);
+                    }
+
+                    // progress step
+                    nailSpacingTestStep++;            
+                }, 50)
+            };
+            break;
+
+        case SENSORS:
+            currentMenuOptions = std::vector<MenuOption>{
+                MenuOption("back", []() { goBack(); }),
+                MenuOption("Pot: 0", nullptr, []() {
+                    int val = (int)(readPotentiometerRaw());
+                    int val2 = (int)(readPotentiometer()*100);
+                    currentMenuOptions[1].name = "Pot:" + std::to_string(val) + " (" + std::to_string(val2) + "%) ";
+                }, 200),
+                MenuOption("Hall: 0", nullptr, []() {
+                    int val = (int)(readHallSensor());
+                    currentMenuOptions[2].name = "Hall: " + std::to_string(val) + "   ";
+                }, 200),
+                MenuOption("Pot: 0", nullptr, []() {
+                    int val = (int)(readPotentiometerRaw());
+                    int val2 = (int)(readPotentiometer()*100);
+                    currentMenuOptions[4].name = "Pot:" + std::to_string(val) + " (" + std::to_string(val2) + "%) ";
+                }, 200),
+            };
+            break;
+
+        case PRINT_SELECT: {
+            currentMenuOptions.push_back(MenuOption("back", []() { goBack(); }));
+            auto printableFiles = readPrintableFileNames();
+            
+            if (printableFiles.size() == 0) {
+                currentMenuOptions.push_back(MenuOption("No files found!", nullptr));
+            } else {
+                for (auto& filename : printableFiles) {
+                    currentMenuOptions.push_back(MenuOption(filename, [filename]() { actionStartPrint(filename); }));
+                }
+            }
+            break;
+        }
+        case PROGRESS:
+            currentMenuOptions = std::vector<MenuOption>{
+                MenuOption("back", []() { goBack(); } ),
+                MenuOption("pause",  []() { pause_printing(!is_printing_paused()); } ),
+                MenuOption("stop",  []() { stop_printing(); changeMenuScreen(PRINT_SELECT); }),
+
+                MenuOption("[----]---% N:---", nullptr, []() {
+                    int print_percent = get_current_print_progress_percent();
+                    int next_nail = get_next_nail_num();
+                    std::string next_nail_str = " N:" + (next_nail >= 0 ? std::to_string(next_nail) : "-");
+
+                    int spare_chars = (print_percent < 100 ? (print_percent < 10 ? 2 : 1) : 0) + (next_nail < 100 ? (next_nail < 10 ? 2 : 1) : 0 ); // aim to use all 16 chars
+                    const int block_num = 4 + spare_chars; 
+                    int filled_blocks = (int)(print_percent * block_num / 100.f);
+                    std::string progress_bar_str = "[";
+
+                    for (int i=0; i<filled_blocks; i++) progress_bar_str += "#";
+                    for (int i=0; i<block_num-filled_blocks; i++) progress_bar_str += "-";
+                    progress_bar_str += "]" + std::to_string(print_percent) + "%";
+
+
+                    currentMenuOptions[3].name = progress_bar_str + next_nail_str;
+                }, 500)
+            };
+            break;
+
+
+        case CREDITS: {
+            currentMenuOptions = std::vector<MenuOption>{
+                MenuOption("back", []() { goBack(); }),
+                MenuOption("autor: Dominik",     nullptr),
+                MenuOption("Matuszczyk",      nullptr),
+                MenuOption("studia: AGH",      nullptr),
+                MenuOption("Informatyka",      nullptr),
+                MenuOption("2026",      nullptr),
+                MenuOption("przedmiot:",      nullptr),
+                MenuOption("Zlozone Sys-",      nullptr),
+                MenuOption("-temy Cyfrowe",      nullptr)
+            };
+            break;
+        }
+        case SETTINGS: {
+            currentMenuOptions = std::vector<MenuOption>{
+                MenuOption("back", []() { goBack(); }),
+                MenuOption("Gwozdzie: 100",     nullptr),
+                MenuOption("Srednica: 366mm",      nullptr)
+            };
+            break;
+        }
+    }
+}
+
+void changeMenuScreen(Screen new_screen) {
+    if (currentScreen != new_screen) screenHistory.push_back(currentScreen);
+    currentScreen = new_screen;
+    prepareScreenData(currentScreen);
+    refreshScreenNextCycle = true;
+    prevSelected = -1;
+
+    Serial.println("New screen loaded with options:");
+    Serial.println(("> Title: " + get_menu_title(currentScreen)).c_str());
+    for (auto opt : currentMenuOptions) {
+        Serial.println(("> " + opt.name).c_str());
+    }
+}
+
+void goBack() {
+    if (!screenHistory.empty()) {
+        currentScreen = screenHistory.back();
+        screenHistory.pop_back();
+        prepareScreenData(currentScreen);
+        refreshScreenNextCycle = true;
+        prevSelected = -1;
+    }
+}
+
+std::string get_menu_title(Screen scr) {
+    switch (scr) {
+        case MAIN: return "Menu";
+        case SETTINGS: return "Settings";
+        case CREDITS: return "Credits";
+        case PROGRESS: return get_current_print_name();
+        case SENSORS: return "Sensors"; 
+        case PRINT_SELECT: return "Select print";
+        case COMPONENTS: {
+            switch (prevSelected) {
+                case 1: return "RGB LED";
+                case 2: return "Stepper";
+                case 3: return "Servo";
+                case 4: return "Homeing";
+                case 5: return "Nail Space (1)";
+                case 6: return "Nail Space (25)";
+                default: return "Components";
+            }
+        }
+        default: return "Menu";
+    }
+}
+
+
+int update_menu_selection() {
+    int optionsCount = currentMenuOptions.size();
+
+    float potVal = readPotentiometer();
+    float optionWidth = 1.0f / optionsCount;
+
+    float currentLowerLimit = (prevSelected * optionWidth) - (optionWidth * MENU_SELECTION_DEAD_ZONE_PERCENT);
+    float currentUpperLimit = ((prevSelected + 1) * optionWidth) + (optionWidth * MENU_SELECTION_DEAD_ZONE_PERCENT);
+
+    if (potVal < currentLowerLimit || potVal > currentUpperLimit || prevSelected == -1) {
+        int selected = (int)(potVal * optionsCount * 0.999f);
+        selected = constrain(selected, 0, optionsCount - 1);
+        return selected;
+    }
+    return prevSelected;
+}
+
+void draw_lcd_menu() {
+    unsigned long currentMs = millis();
+
+    // Obsługa Alertów
+    if (isAlertActive) {
+        if (currentMs > alertEndTime || checkButtonPressed()) {
+            Serial.println("skipping alert with button press") ;
+            isAlertActive = false;
+            refreshScreenNextCycle = true;
+            set_rgb_specified_colour(RGBColour::COLOUR_CLEAR);
+        } 
+        return;
+    }
+    
+    // mapowanie obrotu potencjometru na opcje menu
+    int optionsCount = currentMenuOptions.size();
+    if (optionsCount == 0) return;
+
+    int selected = update_menu_selection();
+    if (selected != prevSelected) {
+        refreshScreenNextCycle = true;
+        prevSelected = selected;
+    }
+    
+    // sprawdz extra opcje menu
+    bool menuWithBackArrow = (currentMenuOptions[0].name == "back"); // sprawdz czy ten ekran ma miec strzalke do cofania
+    bool menuWithPauseButton = currentMenuOptions.size() > 1 && currentMenuOptions[1].name == "pause" && is_print_loaded(); // sprawdz czy ten ekran ma miec opcje pauzy druku
+    bool menuWithStopButton = currentMenuOptions.size() > 2 && currentMenuOptions[2].name == "stop" && is_print_loaded(); // sprawdz czy ten ekran ma miec opcje zatzymania druku
+    
+    bool is_back_arrow_selected = menuWithBackArrow && selected == 0;
+    bool is_pause_selected = menuWithPauseButton && selected == 1;
+    bool is_stop_selected = menuWithStopButton && selected == 2;
+    
+    int first_non_control_menu_option = menuWithBackArrow&&menuWithPauseButton&&menuWithStopButton ? 3 : !menuWithPauseButton&&menuWithBackArrow ? 1 : 0;
+    
+    // Sprawdzanie Update-Loop (np. dla Sensorów)
+    int update_menu_option_index = is_back_arrow_selected||is_pause_selected||is_stop_selected ? first_non_control_menu_option : selected;
+    if (currentMenuOptions[update_menu_option_index].onUpdate != nullptr) {
+        if (currentMs - lastUpdateMs > currentMenuOptions[update_menu_option_index].updateIntervalMs) {
+            currentMenuOptions[update_menu_option_index].onUpdate();
+            lastUpdateMs = currentMs;
+            refreshScreenNextCycle = true; 
+            skipLcdClear = true; // prevent flickering for frequent updates
+        }
+    }
+    if (isAlertActive) return; // early exit if alert thrown
+    
+    // Obsługa Kliknięć
+    if (checkButtonPressed()) {
+        if (currentMenuOptions[selected].onClicked != nullptr) {
+            currentMenuOptions[selected].onClicked();
+        }
+        refreshScreenNextCycle = true;
+        return; 
+    }
+    
+    // Rysowanie Normalnego Menu
+    if (refreshScreenNextCycle) {
+        refreshScreenNextCycle = false;
+        
+        if (!skipLcdClear) lcd.clear();
+        skipLcdClear = false;
+        
+        // Tytul menu
+        lcd.setCursor(0, 0);
+        std::string menu_title = get_menu_title(currentScreen);
+        lcd.print( menu_title.c_str() );
+        
+        // Rysowanie strzałki "back" (jeśli występuje na liscie)
+        if (menuWithBackArrow) {
+            if (is_back_arrow_selected) { 
+                lcd.setCursor(13, 0);
+                lcd.print(" ");
+                lcd.write(CHAR_INVERTED_LESS); 
+                lcd.write(CHAR_INVERTED_DASH);
+                selected = first_non_control_menu_option; // still draw the first option on other line 
+            } else {
+                lcd.setCursor(14, 0);
+                lcd.print("<-");
+            }
+        }
+        
+        // rysowanie ikony do pauzy druku
+        if (menuWithPauseButton) {
+            if (is_pause_selected) {
+                lcd.setCursor(11,0);
+                lcd.print(" ");
+                lcd.write(CHAR_INVERTED_PAUSE);
+                lcd.print(" ");
+                selected = first_non_control_menu_option; // still draw the first option on other line 
+            } else {
+                lcd.setCursor(11,0);
+                lcd.print(" ");
+                lcd.write(CHAR_PAUSE);
+                lcd.print(" ");
+            }
+        }
+
+        // rysowanie ikony do stopu druku
+        if (menuWithStopButton) {
+            if (is_stop_selected) {
+                lcd.setCursor(9,0);
+                lcd.print(" ");
+                lcd.write(CHAR_INVERTED_DOT);
+                lcd.print(" ");
+                selected = first_non_control_menu_option; // still draw the first option on other line 
+            } else {
+                lcd.setCursor(9,0);
+                lcd.print(" ");
+                lcd.write(CHAR_DOT);
+                lcd.print(" ");
+            }
+        }
+
+        // rysowanie tekstu do funckji kontrolych
+        if (is_back_arrow_selected) {
+            lcd.setCursor(9, 0);
+            lcd.print(" back"); 
+        }
+        if (is_pause_selected) {
+            if (is_printing_paused()) {
+                lcd.setCursor(4,0);
+                lcd.print(" unpause");
+            } else {
+                lcd.setCursor(6,0);
+                lcd.print(" pause");
+            }
+        }
+        if (is_stop_selected) {
+            lcd.setCursor(5,0);
+            lcd.print(" stop");
+        }
+        
+        // Wypisz nazwe zaznaczonej opcji menu
+        lcd.setCursor(0, 1);
+        bool isClickable = (currentMenuOptions[selected].onClicked != nullptr);
+        
+        if (selected > first_non_control_menu_option) lcd.print("< "); // jesli nie pierwszy element - strzalka w lewo
+        if (isClickable) {
+            if (is_back_arrow_selected || is_pause_selected || is_stop_selected) lcd.write(CHAR_DOT); // kropka ale nie zaznaczona
+            else lcd.write(CHAR_INVERTED_DOT); // jesli element jest klikalny - kropka 
+        }
+        lcd.print(currentMenuOptions[selected].name.c_str()); // nazwa
+
+        // Serial.println(("Drawing menu option: " + currentMenuOptions[selected].name).c_str());
+        
+        // jesli nie ostatni element - strzalka w prawo
+        if (selected < optionsCount - 1) { 
+            lcd.setCursor(15, 1); 
+            lcd.print(">"); 
+        }
+    }
+}
+
+bool is_showing_alert() {
+    return isAlertActive;
+}
+
+======================================================================
+*** FILE: main.cpp ***
+======================================================================
+
+// autor Dominik Matuszczyk 
+// na przedmiot Zlozone Systemy Cyfrowe - Informatyka AGH
+// 2026
+
+#include "components.h"
+#include "lcd_menu.h"
+
+/* ====================================================================================================== */
+/*                                        MAIN APPLICATION LOGIC                                          */
+/* ====================================================================================================== */
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("Initializing system...");
+    
+    /* Init compoennts */
+    initLcd();
+    initServo();
+    initPotentiometer();
+    initLed();
+    initButton(); 
+    initHallSensor();
+    initSDReader(); 
+    initStepper();
+    
+    /* Init seuqence */
+    Serial.println("Ready!");
+    delay(500);
+    
+    /* prep lcd menu*/
+    lcd.clear();
+    changeMenuScreen(MAIN);
+}   
+
+
+void loop() {
+    loopServo();
+    draw_lcd_menu();
+}
+
+======================================================================
+*** FILE: components.cpp ***
+======================================================================
+
+#include "components.h"
+#include "lcd_menu.h"
+#include "threader.h"
+
+// wlasne znaki do lcd
+byte invLess[8] = { 0b11101, 0b11011, 0b10111, 0b01111, 0b10111, 0b11011, 0b11101, 0b11111 };
+byte invDash[8] = { 0b11111, 0b11111, 0b11111, 0b00000, 0b11111, 0b11111, 0b11111, 0b11111 };
+byte normalDot[8] = { 0b00000, 0b00000, 0b01110, 0b01110, 0b01110, 0b00000, 0b00000, 0b00000 };
+byte invDot[8] = { 0b11111, 0b11111, 0b10001, 0b10001, 0b10001, 0b11111, 0b11111, 0b11111 };
+byte pauseChar[8] = { 0b00000, 0b01010, 0b01010, 0b01010, 0b01010, 0b01010, 0b00000, 0b00000 };
+byte invPauseChar[8] = { 0b11111, 0b10101, 0b10101, 0b10101, 0b10101, 0b10101, 0b11111, 0b11111 };
+
+/* ====================================================================================================== */
+/*                                              COMPONENTS                                                */
+/* ====================================================================================================== */
+
+/* LCD Display */
+    #define I2C_SDA 21
+    #define I2C_SCL 22
+    LiquidCrystal_I2C lcd(0x27, 16, 2); 
+    unsigned long lastDisplayUpdate = 0;
+    
+    void initLcd() {
+        Wire.begin(I2C_SDA, I2C_SCL);
+        lcd.init();
+        lcd.backlight();
+
+        lcd.createChar(CHAR_INVERTED_LESS, invLess);
+        lcd.createChar(CHAR_INVERTED_DASH, invDash);
+        lcd.createChar(CHAR_DOT, normalDot);
+        lcd.createChar(CHAR_INVERTED_DOT, invDot);
+        lcd.createChar(CHAR_PAUSE, pauseChar);
+        lcd.createChar(CHAR_INVERTED_PAUSE, invPauseChar);
+        
+        lcd.setCursor(0, 0);
+        lcd.print("String art robot");
+        lcd.setCursor(0, 1);
+        lcd.print("V2 - Dominik Mat");
+    }
+    
+/* Servo */
+    #define SERVO_PIN 25
+    bool servoIsLeft = true;
+    const int minimumPulseWidthUs = 500; // microseconds
+    const int maximumPulseWidthUs = 2400; // microseconds
+    
+    #define USE_LIBRARY_PWM true
+
+    #if USE_LIBRARY_PWM
+        Servo libServo;
+    #else
+        int servoCurrentPulseWidth = (minimumPulseWidthUs+maximumPulseWidthUs)/2; // start at pos 0 (in middle)
+    #endif
+
+    void initServo() {
+        #if USE_LIBRARY_PWM
+            libServo.setPeriodHertz(50); // Standard 50Hz for SG90
+            libServo.attach(SERVO_PIN, minimumPulseWidthUs, maximumPulseWidthUs); 
+            libServo.write(SERVO_INSIDE_ANGLE); // default pos
+        #else
+            pinMode(SERVO_PIN, OUTPUT);
+        #endif
+    }
+    void servoWrite(int angleDeg = 0) {
+        #if USE_LIBRARY_PWM
+            libServo.write(angleDeg);
+        #else
+            if (angleDeg < 0) angleDeg = 0; // clamp
+            if (angleDeg > 180) angleDeg = 180; // clamp
+
+            int neededPulse = (angleDeg * (maximumPulseWidthUs-minimumPulseWidthUs))/180 + minimumPulseWidthUs;
+            servoCurrentPulseWidth = neededPulse;
+        #endif
+    }
+    void loopServo() {
+        #if USE_LIBRARY_PWM
+            // handled in background
+        #else
+            digitalWrite(SERVO_PIN, HIGH);
+            delayMicroseconds(servoCurrentPulseWidth);
+            digitalWrite(SERVO_PIN, LOW);
+            delayMicroseconds(20000 - servoCurrentPulseWidth);
+        #endif
+    }
+
+/* Potentiometer */
+    #define POTENTIONMETER_PIN 34
+    #define POTENTIONMETER_MIN_VALUE 100
+    #define POTENTIONMETER_MAX_VALUE 3600
+
+    float potentiometerValue = 0; 
+
+    void initPotentiometer() {
+        pinMode(POTENTIONMETER_PIN, INPUT);
+    }
+    float readPotentiometer() {
+        int currentAnaglogValue = analogRead(POTENTIONMETER_PIN);
+        potentiometerValue = (float)(currentAnaglogValue-POTENTIONMETER_MIN_VALUE) / (float)(POTENTIONMETER_MAX_VALUE-POTENTIONMETER_MIN_VALUE);
+        potentiometerValue  = max(0.0f, min(1.0f, 1.0f - potentiometerValue)); 
+        return potentiometerValue;
+    }   
+    int readPotentiometerRaw() {
+        return analogRead(POTENTIONMETER_PIN);
+    }
+
+/* Led */
+    #define LED_R 13
+    #define LED_G 14
+    #define LED_B 32
+    int colorState = 0; 
+    
+    void initLed() {
+        pinMode(LED_R, OUTPUT);
+        pinMode(LED_G, OUTPUT);
+        pinMode(LED_B, OUTPUT);
+        setRGBColor(0, 0, 0);
+    }
+    void setRGBColor(int r, int g, int b) {
+        // Serial.printf("Setting rgb diode colour: RGB(%d,%d,%d)\n",r,g,b);
+        analogWrite(LED_R, r);
+        analogWrite(LED_G, g);
+        analogWrite(LED_B, b);
+    }
+    void set_rgb_specified_colour(RGBColour colour) {
+        switch (colour) {
+            case COLOUR_PRINTING:       setRGBColor(0, 0, 65);   break; // Brak (PREV Niebieski - pracuje)
+            case COLOUR_PRINT_COMPLETE: setRGBColor(0, 150, 0);   break; // Ciemniejszy zielony
+            case COLOUR_PRINT_PAUSED:   setRGBColor(255, 100, 0); break; // Jasny pomarańczowy
+            case COLOUR_PRINT_STOPPED:  setRGBColor(255, 20, 0);  break; // Czerwono-pomarańczowy
+            case COLOUR_READY:          setRGBColor(0, 255, 255); break; // Cyjan - gotowy do wyboru
+            case COLOUR_ERROR:          setRGBColor(255, 0, 0);   break; // Czysty czerwony
+            case COLOUR_CLEAR:          setRGBColor(0, 0, 0);     break; // Wyłączony
+            case COLOUR_ALERT:          setRGBColor(255, 0, 255);     break; // Wyłączony
+            default:                    setRGBColor(0, 0, 0);     break;
+        }
+    }
+
+/* Button */
+    #define BUTTON_PIN 16
+    volatile unsigned long lastButton1Press = 0;
+    const int debounceDelay = 250;
+    volatile bool isButtonPressed = false;
+
+    void IRAM_ATTR handleButton1() {
+        unsigned long interruptTime = millis();
+        if (interruptTime - lastButton1Press > debounceDelay) { 
+            isButtonPressed = true;
+            lastButton1Press = interruptTime;
+            Serial.println("button pressed!");
+        }
+    }
+    void initButton() {
+        pinMode(BUTTON_PIN, INPUT_PULLUP);
+        attachInterrupt(digitalPinToInterrupt(BUTTON_PIN), handleButton1, FALLING);
+    }   
+    bool checkButtonPressed() {
+        if (isButtonPressed) { isButtonPressed = false; return true; }
+        else return false;
+    }
+
+/* SD Card Reader */
+    #define SD_CS_PIN 5
+    #define SD_SCK_PIN 18
+    #define SD_MISO_PIN 19
+    #define SD_MOSI_PIN 23
+    bool sd_card_detected = false;
+
+    void initSDReader() {
+        Serial.print("Init SD Card ... ");
+        if (!SD.begin(SD_CS_PIN)) {
+            Serial.println("> SD card NOT detected.");
+        } else {
+            sd_card_detected = true;
+            Serial.println("> SD card detected!");
+        }
+    }
+    void attempt_detect_sd_card() {
+        Serial.print("Attempting Detect SD card ... ");
+        if (SD.begin(SD_CS_PIN)) {
+          showAlert("new SD card" , "detected");
+          Serial.println("> detected");  
+          sd_card_detected = true;
+        } 
+        else sd_card_detected = false;
+    }
+    std::vector<std::string> readPrintableFileNames() {
+        if (!sd_card_detected) attempt_detect_sd_card();
+
+        std::vector<std::string> fileNames;
+        File root = SD.open("/");
+        if (!root) {
+            Serial.println("Nie mozna otworzyc folderu glownego SD");
+            sd_card_detected = false;
+            return fileNames;
+        }
+
+        File file = root.openNextFile();
+        while (file) {
+            if (!file.isDirectory()) {
+                String name = file.name();
+                // Szukamy plików z rozszerzeniem .gcode
+                if (name.endsWith(".gcode") || name.endsWith(".GCODE")) {
+                    int dotIndex = name.lastIndexOf('.'); // usun rozszerzenie
+                    String nameWithoutExt = name.substring(0, dotIndex);
+                    if (nameWithoutExt.startsWith("/")) { // unsun wiodacy slash
+                        nameWithoutExt = nameWithoutExt.substring(1);
+                    }
+                    fileNames.push_back(nameWithoutExt.c_str());
+                }
+            }
+            file = root.openNextFile();
+        }
+        root.close();
+        return fileNames;
+    }
+    PrintSequence generatePrintSequenceFromFile(std::string filename) {
+        if (!sd_card_detected) attempt_detect_sd_card();
+
+        PrintSequence seq;
+        seq.print_name = filename;
+        
+        String fullPath = "/" + String(filename.c_str()) + ".gcode";
+        File file = SD.open(fullPath);
+        if (!file) return seq;
+
+        bool inSequence = false;
+        
+        while (file.available()) {
+            // Czytamy całą linię do znaku nowej linii, funkcja trim() usuwa białe znaki (np. \r)
+            String line = file.readStringUntil('\n');
+            line.trim(); 
+            
+            if (line.length() == 0) continue;
+
+            if (line.startsWith("NAIL_NUMBER=")) {
+                seq.nail_number = line.substring(12).toInt();
+            } 
+            else if (line.startsWith("SEQUENCE_LENGTH=")) {
+                seq.sequence_length = line.substring(16).toInt();
+            } 
+            else if (line == "SEQUENCE_START") {
+                inSequence = true;
+            } 
+            else if (line == "SEQUENCE_END") {
+                inSequence = false;
+            } 
+            else if (inSequence) {
+                seq.nail_sequence.push_back(line.toInt());
+            }
+        }
+        file.close();
+        return seq;
+    }
+
+
+/* Hall Sensor */
+    #define HALL_INPUT_PIN 35
+    int hallValue = 0;
+
+    void initHallSensor() {
+        pinMode(HALL_INPUT_PIN, INPUT);
+    }
+    int readHallSensor() {
+        hallValue = analogRead(HALL_INPUT_PIN);
+        return hallValue;
+    }
+    bool isHallActive() {
+        return hallValue == 0;
+    }
+
+/* DRV Stepper Controller (AccelStepper) */
+    #define DRV_STEP_PIN 27
+    #define DRV_DIR_PIN 26
+    #define DRV_ENABLE_PIN 4 // connected do bridged pines on DRV - RST and SLP
+    #define DRV_M0_PIN 2
+    #define DRV_M1_PIN 33
+
+    // const int TARGET_STEPPER_RPM = 10;
+    // const int STEP_DELAY_MICROSECONDS = (60 / TARGET_STEPPER_RPM) * 1000 * 1000 / 4096; 
+    const float STEPPER_HOME_MOVEMENT_OFFSET = -6 * (1/8.0f); // 6 steps anti-clockwise
+    const float STEPPER_HOME_POSITION_OFFSET = .5 * (1/8.0f) ; //-2/32.0f; // tiny clockwise offset
+    
+    const int STEPS_PER_FULL_STEPPER_ROTATION = 200;
+    const int DEFAULT_STEPPER_SPEED = STEPS_PER_FULL_STEPPER_ROTATION * 0.225; // steps per second
+    MicrostepMode current_microstep_mode = MicrostepMode::STEP_MODE_EIGHTS;
+    AccelStepper stepper(AccelStepper::DRIVER, DRV_STEP_PIN, DRV_DIR_PIN);
+
+    void initStepper() {
+        stepper.setMaxSpeed(STEPS_PER_FULL_STEPPER_ROTATION * 4);
+        stepper.setAcceleration(500.0);
+
+        pinMode(DRV_ENABLE_PIN, OUTPUT);
+        pinMode(DRV_M0_PIN, OUTPUT);
+        pinMode(DRV_M1_PIN, OUTPUT);
+
+        digitalWrite(DRV_ENABLE_PIN, HIGH);
+        change_microstepping_mode(current_microstep_mode);
+    }
+
+    void move_stepper_steps(float step_number, bool anti_clockwise, bool bypass_print_checks) {
+        if (step_number <= 0) return;
+
+        // Obliczamy cel relatywny
+        int relative_move = round((float)(anti_clockwise ? -step_number : step_number) * (int)current_microstep_mode);  
+        stepper.setMaxSpeed(DEFAULT_STEPPER_SPEED * (int)current_microstep_mode);
+        stepper.move(relative_move);
+        
+        unsigned long last_watchdog_yield = millis();
+        
+        // petla na ruch silnika
+        while (stepper.distanceToGo() != 0) {
+            if (!bypass_print_checks) {
+                if (!is_print_loaded()) {
+                    stepper.stop(); 
+                    return;
+                }
+                while (is_printing_paused() && is_print_loaded()) {
+                    vTaskDelay(50 / portTICK_PERIOD_MS);
+                }
+            }
+
+            stepper.run();
+            
+            // Oddanie czasu dla FreeRTOS (Watchdog), żeby nie resetowało ESP32
+            if (millis() - last_watchdog_yield > 10) {
+                taskYIELD();
+                last_watchdog_yield = millis();
+            }
+        }
+
+        // Aktualizacja pozycji w Threader.cpp
+        float actual_move = relative_move / (float)(int)current_microstep_mode;
+        change_current_ring_position(-actual_move);
+
+        Serial.printf("Moved stepper with step number: %f (curr microstep mode: %d * 1/%d) out of %f \n", actual_move, relative_move, (int)current_microstep_mode, step_number);
+    }
+
+    void change_microstepping_mode(MicrostepMode microstep_mode) {
+        current_microstep_mode = microstep_mode;
+        
+        switch (microstep_mode) {
+            case STEP_MODE_FULL:
+            digitalWrite(DRV_M0_PIN, LOW);
+                digitalWrite(DRV_M1_PIN, LOW);
+                break;
+            case STEP_MODE_HALF:
+                digitalWrite(DRV_M0_PIN, HIGH);
+                digitalWrite(DRV_M1_PIN, LOW);
+                break;
+            case STEP_MODE_QUARTER:
+                digitalWrite(DRV_M0_PIN, LOW);
+                digitalWrite(DRV_M1_PIN, HIGH);
+                break;
+            case STEP_MODE_EIGHTS:
+                digitalWrite(DRV_M0_PIN, HIGH);
+                digitalWrite(DRV_M1_PIN, HIGH);
+                break;
+        }
+        // Krótkie opóźnienie, aby sterownik ustabilizował prąd na cewkach po zmianie
+        vTaskDelay(5 / portTICK_PERIOD_MS);
+    }
+    MicrostepMode get_current_microstep_mode() {
+        return current_microstep_mode;
+    }
+
+    void find_stepper_home_position() {
+        Serial.println("Rozpoczynam szukanie punktu ZERO (Homing)...");
+
+        MicrostepMode curr_mode = get_current_microstep_mode();
+        change_microstepping_mode(STEP_MODE_EIGHTS);
+        float homing_speed = 200.0;
+        stepper.setMaxSpeed(homing_speed);
+
+        // Jeśli wystartowaliśmy dokładnie nad magnesem - zchodzmiy
+        readHallSensor();
+        if (isHallActive()) {
+            stepper.setSpeed(-homing_speed); // Kręcimy w tył (CCW)
+            while (isHallActive()) {
+                stepper.runSpeed();
+                readHallSensor(); 
+                taskYIELD();
+            }
+            stepper.move(-100);
+            while (stepper.distanceToGo() != 0) { stepper.run(); taskYIELD(); }
+        }
+
+        stepper.setSpeed(homing_speed); // Kręcimy w przód (CW)
+        while (!isHallActive()) {
+            stepper.runSpeed();
+            readHallSensor();
+            taskYIELD();
+        }
+        long edge1 = stepper.currentPosition();
+        //Serial.printf("Krawędź 1 znaleziona na kroku: %ld\n", edge1);
+
+        while (isHallActive()) {
+            stepper.runSpeed();
+            readHallSensor();
+            taskYIELD();
+        }
+        long edge2 = stepper.currentPosition();
+        //Serial.printf("Krawędź 2 znaleziona na kroku: %ld\n", edge2);
+
+        long center_position = (edge1 + edge2) / 2;
+        //Serial.printf("Idealny środek obliczony na krok: %ld\n", center_position);
+
+        stepper.moveTo(center_position);
+        stepper.setMaxSpeed(400.0);
+        stepper.setAcceleration(200.0); // Włączamy akcelerację dla płynnego powrotu
+        
+        while (stepper.distanceToGo() != 0) {
+            stepper.run();
+            taskYIELD();
+        }
+
+        // set 0 position after applying offset
+        move_stepper_steps(abs(STEPPER_HOME_MOVEMENT_OFFSET), STEPPER_HOME_MOVEMENT_OFFSET < 0, true);
+        // stepper.setCurrentPosition(-STEPPER_HOME_POSITION_OFFSET);
+        set_current_ring_position(-STEPPER_HOME_POSITION_OFFSET); // Synchronizujemy z zewnętrznym licznikiem w Threaderze
+
+        change_microstepping_mode(curr_mode); // ustaw poprzedni tryb microstepping        
+        Serial.println("Homing zakończony sukcesem!");
+    }
+
+
+======================================================================
+*** FILE: threader.cpp ***
+======================================================================
+
+#include "threader.h"
+#include "lcd_menu.h"
+#include "components.h"
+#include <Arduino.h>
+#include <math.h>
+
+PrintSequence current_print;
+bool print_loaded = false;
+int print_progress_percent = 0;
+bool paused = false;
+
+int nail_number = 120; 
+float steps_per_single_nail = (float)STEPS_PER_FULL_STEPPER_ROTATION / (float) nail_number; 
+
+// SERVO PARAMS
+const int SERVO_MIDDLE_ANGLE = 90;
+const int SERVO_ROTATION_ANGLE_SPAN = 30;
+const int SERVO_INSIDE_ANGLE = SERVO_MIDDLE_ANGLE + SERVO_ROTATION_ANGLE_SPAN / 2;
+const int SERVO_OUTSIDE_ANGLE = SERVO_MIDDLE_ANGLE - SERVO_ROTATION_ANGLE_SPAN / 2;
+const int SERVO_DELAY_MS = 250;
+
+// stepper params
+const int STEPPER_DELAY_MS = 1200;
+const MicrostepMode DEFAULT_MICROSTEP_MODE = MicrostepMode::STEP_MODE_EIGHTS;
+
+// Stan maszyny
+float current_ring_step_position = 0;
+int current_servo_angle = 90;
+int next_nail = 0;
+
+// Uchwyt do wątku FreeRTOS
+TaskHandle_t printTaskHandle = NULL;
+
+/* ====================================================================================================== */
+/*                                            RING MOVEMENT                                               */
+/* ====================================================================================================== */
+
+float get_current_ring_position() {
+    return current_ring_step_position;
+}
+void set_current_ring_position(float step_position) {
+    if (step_position > STEPS_PER_FULL_STEPPER_ROTATION) step_position -= STEPS_PER_FULL_STEPPER_ROTATION;
+    if (step_position < 0) step_position += STEPS_PER_FULL_STEPPER_ROTATION;
+    current_ring_step_position = step_position;
+}
+void change_current_ring_position(float steps) {
+    set_current_ring_position( current_ring_step_position + steps );
+}
+
+void rotate_ring_to_nail(int nail_idx, bool bypass_print_checks) {
+    float target_pos = nail_idx * steps_per_single_nail;
+    float diff = target_pos - current_ring_step_position;
+    
+    // Obliczanie najkrótszej drogi obrotu (zgodnie ze wskazówkami lub pod prąd)
+    if (diff > STEPS_PER_FULL_STEPPER_ROTATION / 2) diff -= STEPS_PER_FULL_STEPPER_ROTATION;
+    if (diff < -STEPS_PER_FULL_STEPPER_ROTATION / 2) diff += STEPS_PER_FULL_STEPPER_ROTATION;
+
+    change_microstepping_mode(DEFAULT_MICROSTEP_MODE);
+    move_stepper_steps(abs(diff), diff > 0, bypass_print_checks);
+}
+
+void plot_around_nail (int nail_idx) {
+    if (!print_loaded) return;
+    
+    bool movement_dir = true; //(nail_idx*steps_per_single_nail) - current_ring_step_position < 0;
+    int nail_idx_first = movement_dir ? nail_idx : (nail_idx + 1) % nail_number;
+    int nail_idx_last = movement_dir ? (nail_idx + 1) % nail_number : nail_idx;
+
+    rotate_ring_to_nail(nail_idx_first);
+    vTaskDelay(STEPPER_DELAY_MS / portTICK_PERIOD_MS);
+        
+    servoWrite(SERVO_OUTSIDE_ANGLE);
+    vTaskDelay(SERVO_DELAY_MS / portTICK_PERIOD_MS);
+    
+    rotate_ring_to_nail(nail_idx_last);
+    vTaskDelay(STEPPER_DELAY_MS / portTICK_PERIOD_MS);
+    
+    servoWrite(SERVO_INSIDE_ANGLE);
+    vTaskDelay(SERVO_DELAY_MS / portTICK_PERIOD_MS);
+}
+
+
+/* ====================================================================================================== */
+/*                                           THREADING LOGIC                                              */
+/* ====================================================================================================== */
+
+// prepare the robot for printing 
+// setups stepper configs, servo position, 
+// runs init sequence for stirng to wrap around first nail
+void setup_printing_mode(){
+
+    // move servo inside 
+    servoWrite(SERVO_INSIDE_ANGLE);
+
+    // find home pos for nail ring
+    find_stepper_home_position();
+    
+    // user sequence for tieing first nail
+    rotate_ring_to_nail((current_print.nail_sequence[0] + nail_number/2) % nail_number); // move ring so first nail is directly accross ring
+    // pause_printing(true);
+    showAlert("Tie string" , "accross ring", 600000);
+}
+
+bool load_new_print_sequence(PrintSequence seq) {
+    // Zakoncz poprzednie zadanie jesli aktywne
+    if (printTaskHandle != NULL) {
+        Serial.println("Stopping previous task...");
+        stop_printing(); 
+        vTaskDelay(200 / portTICK_PERIOD_MS); // Daj czas na posprzątanie
+    }
+    current_print = seq;
+    
+    // Sprawdz czy sa dane w sekwencji
+    if (current_print.nail_sequence.empty()) {
+        set_printing_error("ERR Nail sequen-", "-ce is empty!");
+        return false;
+    }
+
+    // sprawdz czy rozklad gwozdzi sie zgadza
+    // if (current_print.nail_number != NUM_NAILS) {
+    //     // "Nail num mismatch seq:200 set:200"
+    //     set_printing_error("NailNum mismatch", "seq:"+std::to_string(current_print.nail_number) + " set:" + std::to_string(NUM_NAILS));
+    //     return false;
+    // }
+
+    // ustaw dane poczatkowe
+    print_loaded = true;
+    paused = false;
+    print_progress_percent = 0;
+    Serial.printf("Creating task for print: %s with %d nails\n", current_print.print_name.c_str(), current_print.nail_sequence.size());
+
+    // dostosuj rozklad gwozdzi
+    nail_number = current_print.nail_number;
+    steps_per_single_nail = STEPS_PER_FULL_STEPPER_ROTATION / (float)nail_number;
+    Serial.printf("Set new nail number for print: %d\n", nail_number);
+
+    // obliczaniie wymaganej dlugosci nici
+    float required_string_m = calculate_total_string_length_meters(current_print);
+    Serial.printf("Creating task for print: %s with %d nails\n", current_print.print_name.c_str(), current_print.nail_sequence.size());
+    Serial.printf("===> POTRZEBNA DLUGOSC NICI: %.2f metrow <===\n", required_string_m);
+
+    // setup robot
+    setup_printing_mode();
+
+    // Tworzymy osobny watek na drukowanie
+    BaseType_t result = xTaskCreatePinnedToCore(
+        printTask,"PrintTask", 8192, NULL, 2, &printTaskHandle, 0
+    );
+
+    if (result != pdPASS) {
+        Serial.println("CRITICAL ERROR: Failed to create PrintTask (Out of memory?)");
+        return false;
+    }
+
+    set_rgb_specified_colour(COLOUR_PRINTING);
+    return true;
+}
+
+void stop_printing() { 
+    print_loaded = false;
+    paused = false; // odblokowujemy pętle żeby wątek mógł umrzeć
+    if (printTaskHandle != NULL) {
+        vTaskDelete(printTaskHandle); // Natychmiastowe zabicie wątku
+        printTaskHandle = NULL;
+    }
+    Serial.println("Wydruk przerwany przez uzytkownika (STOP).");
+    showAlert("Printing STOP");
+    set_rgb_specified_colour(COLOUR_PRINT_STOPPED);
+}
+
+void printTask(void *pvParameters) {
+    Serial.println(">>>> PRINT TASK STARTED <<<<");
+    
+    servoWrite(SERVO_INSIDE_ANGLE);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+
+    int total_nails = current_print.nail_sequence.size();
+    
+    // wait to clear alert msg
+    while (is_showing_alert()) {
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+    find_stepper_home_position(); // in case user moves ring while attaching string
+
+    // Obsługa pierwszego gwoździa NIEPOTRZEBNA JUZ
+    next_nail = -1; //current_print.nail_sequence[0] % nail_number; // assume nails are 0 indexed
+    // Serial.printf("Moving to start nail: %d\n", next_nail);
+    // rotate_ring_to_nail(next_nail);
+
+    // glowna petla
+    for (int i = 1; i < total_nails; i++) {
+        while ((paused && print_loaded) || is_showing_alert()) {
+            static unsigned long last_pause_msg = 0;
+            if (millis() - last_pause_msg > 2000) {
+                Serial.println("Print is paused. Waiting...");
+                last_pause_msg = millis();
+            }
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+        
+        if (!print_loaded) {
+            Serial.println("Print flag cleared. Exiting loop.");
+            break;
+        }
+        
+        next_nail = current_print.nail_sequence[i] % nail_number; // assume nails are 0 indexed
+        Serial.printf("Step %d/%d: Plotting nail %d\n", i+1, total_nails, next_nail+1);
+        
+        plot_around_nail(next_nail);
+        
+        print_progress_percent = (i * 100) / (total_nails - 1);
+        
+        vTaskDelay(10 / portTICK_PERIOD_MS); 
+    }
+
+    Serial.println(">>>> PRINT TASK FINISHED <<<<");
+    printTaskHandle = NULL;
+    vTaskDelete(NULL); 
+    set_rgb_specified_colour(COLOUR_PRINT_COMPLETE);
+}
+
+/* ====================================================================================================== */
+/*                                              HELPERS                                                   */
+/* ====================================================================================================== */
+
+int get_current_print_progress_percent() { return print_progress_percent; }
+std::string get_current_print_name() { return print_loaded ? current_print.print_name : "none"; }
+void pause_printing(bool state) { 
+    paused = state;
+    if(state) set_rgb_specified_colour(COLOUR_PRINT_PAUSED);
+    else      set_rgb_specified_colour(COLOUR_PRINTING); 
+
+    Serial.println("Printing paused, returning to home pos in 5s");
+    vTaskDelay( (2*(STEPPER_DELAY_MS+SERVO_DELAY_MS) + 1000) / portTICK_PERIOD_MS); // wait for threader task to finish 
+
+    servoWrite(SERVO_INSIDE_ANGLE);
+    find_stepper_home_position();
+}
+bool is_printing_paused() { return paused; }
+bool is_print_loaded() { return print_loaded; }
+int get_next_nail_num() { return print_loaded && !paused ? next_nail : -1; }
+
+void set_printing_error(std::string line1, std::string line2) {
+    showAlert(line1,line2);
+    Serial.print( ("Printing error thrown: " + line1+line2).c_str() );
+}
+
+float calculate_total_string_length_meters(PrintSequence seq, float ring_diameter_mm) {
+    if (seq.nail_sequence.size() < 2) return 0.0f;
+
+    float radius_mm = ring_diameter_mm / 2.0f;
+    float total_length_mm = 0.0f;
+    int n = seq.nail_number;
+
+    for (size_t i = 1; i < seq.nail_sequence.size(); i++) {
+        int n1 = seq.nail_sequence[i - 1];
+        int n2 = seq.nail_sequence[i];
+
+        // Szukamy najkrótszej drogi między gwoździami po okręgu
+        int diff = abs(n1 - n2);
+        if (diff > n / 2) diff = n - diff; 
+
+        // Kąt w radianach i długość cięciwy
+        float angle_rad = diff * (2.0f * M_PI / n);
+        float distance = 2.0f * radius_mm * sin(angle_rad / 2.0f);
+        
+        total_length_mm += distance;
+
+        // Dodajemy 10mm marginesu per gwóźdź na samo owinięcie wokół metalu
+        total_length_mm += 10.0f; 
+    }
+
+    return total_length_mm / 1000.0f; // Zamiana mm na metry
+}
+
+void wait_ms(int wait_time) {
+    unsigned long current_time = millis();
+    unsigned long end_time = current_time + wait_time;
+    unsigned long last_watchdog_yield = current_time;
+    
+    while (current_time < end_time){
+        if (current_time - last_watchdog_yield > 15) {
+            taskYIELD();
+            last_watchdog_yield = current_time;        
+        }
+        vTaskDelay(5 / portTICK_PERIOD_MS);
+        current_time = millis();
+    }
+}
+
+======================================================================
+*** FILE: lcd_menu.h ***
+======================================================================
+
+#ifndef LCD_MENU_H
+#define LCD_MENU_H
+
+#include "components.h"
+#include <string>
+#include <vector>
+
+// enum for screen selection
+enum Screen {
+    MAIN, PRINT_SELECT, PROGRESS, SENSORS, SETTINGS, CREDITS, COMPONENTS
+};
+
+const int DEFAULT_SCREEN_REFRESH_INTERVAL_MS = 1000;
+const int DEFALUT_ALERT_DURATION_MS = 2250;
+
+// menu option struct
+using MenuCallback = std::function<void()>;
+struct MenuOption {
+    std::string name;
+    MenuCallback onClicked = nullptr;
+    MenuCallback onUpdate = nullptr;
+    int updateIntervalMs = DEFAULT_SCREEN_REFRESH_INTERVAL_MS;
+
+    MenuOption(std::string n, 
+        MenuCallback click = nullptr, 
+        MenuCallback update = nullptr, 
+        int interval = DEFAULT_SCREEN_REFRESH_INTERVAL_MS)
+    : name(n), onClicked(click), onUpdate(update), updateIntervalMs(interval)
+    {}
+};
+
+/* callbacki na klikniecie */
+void actionStartPrint(std::string filename);
+void changeMenuScreen(Screen new_screen);
+std::string get_menu_title(Screen screen);
+void goBack();
+void showAlert(std::string msg1, std::string msg2="", unsigned long durationMs = DEFALUT_ALERT_DURATION_MS);
+
+// helpery
+int update_menu_selection();
+
+// glowna funckja
+void draw_lcd_menu();
+bool is_showing_alert();
+
+#endif
+
+

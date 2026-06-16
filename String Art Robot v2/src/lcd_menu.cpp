@@ -18,6 +18,8 @@ int rgbTestStep = -1;
 int stepperTestStep = -1;
 int servoTestStep = -1;
 unsigned long nextTestStepMs = 0;
+int homeingTestStep = -1;
+int nailSpacingTestStep = -1;
 
 // variables
 bool refreshScreenNextCycle = true;
@@ -41,7 +43,7 @@ std::vector<MenuOption> currentMenuOptions;
 extern std::vector<MenuOption> sensorMenu;
 
 /* callbacki na klikniecie */
-void showAlert(std::string msg_line_1, std::string msg_line_2, int durationMs) {
+void showAlert(std::string msg_line_1, std::string msg_line_2, unsigned long durationMs) {
     alertMessage = msg_line_1+msg_line_2;
     alertEndTime = millis() + durationMs;
     isAlertActive = true;
@@ -51,6 +53,8 @@ void showAlert(std::string msg_line_1, std::string msg_line_2, int durationMs) {
     lcd.setCursor(max(0,(16-msg_line_2.size())/2),1); // wysrodkowanie
     lcd.print(msg_line_2.c_str());
     set_rgb_specified_colour(RGBColour::COLOUR_ALERT);
+
+    Serial.printf("Displaying alert msg: \n - %s - %s \n", msg_line_1.c_str(), msg_line_2.c_str());
 }
 
 void actionStartPrint(std::string filename) {
@@ -140,6 +144,68 @@ void prepareScreenData(Screen screen) {
                         case 6: servoWrite(90);                  currentMenuOptions[3].name = "Test Done      ";   nextTestStepMs = millis() + 1200; servoTestStep++; break;
                         default: servoTestStep = -1; break;
                     }
+                }, 50),
+                // HOMEING TEST
+                MenuOption("Find home pos  ", []() { find_stepper_home_position(); }),
+
+                // NAIL SPACING TEST
+                MenuOption("Run Test  ", []() { nailSpacingTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    if (nailSpacingTestStep == -1) { currentMenuOptions[5].name = "Run Test  "; return; }
+                    if (isAlertActive) return;
+                    if (nailSpacingTestStep >= 120) { nailSpacingTestStep = -1; return; } 
+                    
+                    // start and end conditions
+                    if (nailSpacingTestStep == 0) {
+                        servoWrite(SERVO_INSIDE_ANGLE);
+                        find_stepper_home_position(); // go to nail 0 position
+                        showAlert("At nail zero", "(home pos)", 1000000);
+                    } 
+                    
+                    // nail logic
+                    else {
+                        rotate_ring_to_nail(nailSpacingTestStep, true);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_OUTSIDE_ANGLE);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_INSIDE_ANGLE);
+
+                        std::string line2 = "Nail: " + std::to_string(nailSpacingTestStep) + "/120";
+                        showAlert("Testing gap...", line2, 1000000);
+                    }
+
+                    // progress step
+                    nailSpacingTestStep++;            
+                }, 50),
+
+                // NAIL SPACING TEST 2
+                MenuOption("Run Test  ", []() { nailSpacingTestStep = 0; nextTestStepMs = millis(); }, []() {
+                    
+                    if (nailSpacingTestStep == -1) { currentMenuOptions[6].name = "Run Test  "; return; }
+                    if (isAlertActive) return;
+                    if (nailSpacingTestStep >= 24) { nailSpacingTestStep = -1; return; } 
+                    
+                    // start and end conditions
+                    if (nailSpacingTestStep == 0) {
+                        servoWrite(SERVO_INSIDE_ANGLE);
+                        find_stepper_home_position(); // go to nail 0 position
+                        showAlert("At nail zero", "(home pos)", 1000000);
+                    } 
+                    
+                    // nail logic
+                    else {
+                        int nail_idx = (nailSpacingTestStep * 25) % 120;
+                        rotate_ring_to_nail(nail_idx, true);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_OUTSIDE_ANGLE);
+                        vTaskDelay(1000 / portTICK_PERIOD_MS);
+                        servoWrite(SERVO_INSIDE_ANGLE);
+
+                        std::string line2 = "Nail: " + std::to_string(nail_idx) + "/120";
+                        showAlert("Testing gap...", line2, 1000000);
+                    }
+
+                    // progress step
+                    nailSpacingTestStep++;            
                 }, 50)
             };
             break;
@@ -262,10 +328,15 @@ std::string get_menu_title(Screen scr) {
         case SENSORS: return "Sensors"; 
         case PRINT_SELECT: return "Select print";
         case COMPONENTS: {
-            if (prevSelected == 1) return "RGB LED";
-            if (prevSelected == 2) return "Stepper";
-            if (prevSelected == 3) return "Servo";
-            return "Components";
+            switch (prevSelected) {
+                case 1: return "RGB LED";
+                case 2: return "Stepper";
+                case 3: return "Servo";
+                case 4: return "Homeing";
+                case 5: return "Nail Space (1)";
+                case 6: return "Nail Space (25)";
+                default: return "Components";
+            }
         }
         default: return "Menu";
     }
@@ -284,8 +355,6 @@ int update_menu_selection() {
     if (potVal < currentLowerLimit || potVal > currentUpperLimit || prevSelected == -1) {
         int selected = (int)(potVal * optionsCount * 0.999f);
         selected = constrain(selected, 0, optionsCount - 1);
-        Serial.printf("New option selected: %d (Pot: %.3f, Range: [%.3f - %.3f])\n", 
-                          selected, potVal, currentLowerLimit, currentUpperLimit);
         return selected;
     }
     return prevSelected;
@@ -296,13 +365,13 @@ void draw_lcd_menu() {
 
     // Obsługa Alertów
     if (isAlertActive) {
-        if (currentMs > alertEndTime) {
+        if (currentMs > alertEndTime || checkButtonPressed()) {
+            Serial.println("skipping alert with button press") ;
             isAlertActive = false;
             refreshScreenNextCycle = true;
             set_rgb_specified_colour(RGBColour::COLOUR_CLEAR);
-        } else {
-            return; 
-        }
+        } 
+        return;
     }
     
     // mapowanie obrotu potencjometru na opcje menu
@@ -311,7 +380,6 @@ void draw_lcd_menu() {
 
     int selected = update_menu_selection();
     if (selected != prevSelected) {
-        Serial.printf("New option selected: %d\n", selected);
         refreshScreenNextCycle = true;
         prevSelected = selected;
     }
@@ -337,6 +405,7 @@ void draw_lcd_menu() {
             skipLcdClear = true; // prevent flickering for frequent updates
         }
     }
+    if (isAlertActive) return; // early exit if alert thrown
     
     // Obsługa Kliknięć
     if (checkButtonPressed()) {
@@ -443,4 +512,8 @@ void draw_lcd_menu() {
             lcd.print(">"); 
         }
     }
+}
+
+bool is_showing_alert() {
+    return isAlertActive;
 }

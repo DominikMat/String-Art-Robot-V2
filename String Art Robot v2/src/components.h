@@ -65,7 +65,7 @@ int readHallSensor();
 void initStepper();
 void setRGBColor(int r, int g, int b);
 void set_rgb_specified_colour(RGBColour colour);
-void move_stepper_steps(int step_number, bool anti_clockwise, bool bypass_print_checks = false);
+void move_stepper_steps(float step_number, bool anti_clockwise, bool bypass_print_checks = false);
 void change_microstepping_mode(MicrostepMode microstep_mode);
 MicrostepMode get_current_microstep_mode();
 void find_stepper_home_position();

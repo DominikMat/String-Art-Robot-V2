@@ -1,6 +1,6 @@
 import os
 
-def consolidate_code(output_filename="web_traffic_simulator_codebase.txt"):
+def consolidate_code(output_filename="string_robot_code.txt"):
     """
     Consolidates code files into one text file, skipping blacklisted items.
     """
